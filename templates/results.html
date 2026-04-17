@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}筛选结果 - 车辆进出筛选工具{% endblock %}
+
+{% block content %}
+  <div class="step-badge">步骤 3 / 3 · 查看结果</div>
+  <h2>筛选结果概览</h2>
+  {% if results %}
+    <p class="subtext">共找到 <strong>{{ results|length }}</strong> 条满足条件的通行记录对。评分越高，越接近您设定的目标过车间隔；高风险结果会以警戒色突出显示。</p>
+
+    <div class="summary-grid">
+      <div class="summary-card summary-card-danger">
+        <div class="summary-label">高风险</div>
+        <div class="summary-value">{{ summary.red }}</div>
+        <div class="summary-note">警戒色，建议优先复核</div>
+      </div>
+      <div class="summary-card summary-card-warning">
+        <div class="summary-label">中风险</div>
+        <div class="summary-value">{{ summary.yellow }}</div>
+        <div class="summary-note">关注色，建议结合业务核查</div>
+      </div>
+      <div class="summary-card summary-card-safe">
+        <div class="summary-label">低风险</div>
+        <div class="summary-value">{{ summary.blue }}</div>
+        <div class="summary-note">常规色，可作为辅助参考</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-label">关键指标</div>
+        <div class="summary-value">{{ summary.max_score }} 分</div>
+        <div class="summary-note">平均间隔 {{ "%.2f"|format(summary.avg_delta) }} 分钟</div>
+      </div>
+    </div>
+
+    <div class="results-toolbar" style="margin-bottom: 12px;">
+      <div class="legend">
+        <span>颜色说明：</span>
+        <span class="legend-dot red"></span><span>高风险：警戒色（≥ 70 分）</span>
+        <span class="legend-dot yellow"></span><span>中风险：关注色（40–69 分）</span>
+        <span class="legend-dot blue"></span><span>低风险：常规色（＜ 40 分）</span>
+      </div>
+      <div class="toolbar-note">
+        下载结果会导出为带风险底色的 Excel 文件，便于离线查看和转发。
+      </div>
+    </div>
+
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>车牌号</th>
+            <th>号牌种类</th>
+            <th>入口通行时间</th>
+            <th>入口卡口</th>
+            <th>出口通行时间</th>
+            <th>出口卡口</th>
+            <th>时间间隔（分钟）</th>
+            <th>评分</th>
+            <th>风险等级</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in results %}
+          <tr class="score-{{ row.level }}">
+            <td>{{ row.plate }}</td>
+            <td>{{ row.plate_type }}</td>
+            <td>{{ row.first_time }}</td>
+            <td>{{ row.first_location }}</td>
+            <td>{{ row.second_time }}</td>
+            <td>{{ row.second_location }}</td>
+            <td>{{ "%.2f"|format(row.delta_minutes) }}</td>
+            <td>{{ row.score }}</td>
+            <td><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="form-row fixed-actions">
+      <div class="fixed-actions-left">
+        <a href="{{ url_for('download', data_id=data_id) }}" class="btn">下载结果 Excel（带警戒色）</a>
+        <a href="{{ url_for('review', data_id=data_id) }}" class="btn btn-ghost">调整筛选条件</a>
+      </div>
+      <div class="fixed-actions-right">
+        <a href="{{ url_for('upload_form') }}" class="btn btn-secondary">重新上传新数据</a>
+      </div>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <p>没有符合条件的记录，请尝试调整入口/出口卡口、时间段或目标过车间隔。</p>
+      <a href="{{ url_for('review', data_id=data_id) }}" class="btn">返回修改筛选条件</a>
+      <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">重新上传文件</a>
+    </div>
+  {% endif %}
+{% endblock %}

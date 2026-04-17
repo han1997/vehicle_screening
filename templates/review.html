@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+
+{% block title %}配置出入卡口与筛选条件 - 车辆进出筛选工具{% endblock %}
+
+{% block content %}
+  <div class="step-badge">步骤 2 / 3 · 配置卡口</div>
+  <h2>搜索并选择入口、出口卡口</h2>
+  <p class="subtext">卡口库已移到首页维护。当前页面只负责从本地卡口库中搜索、实时匹配并勾选入口与出口卡口，再设置筛选时间段和目标过车间隔。</p>
+
+  <div class="summary-grid">
+    <div class="summary-card">
+      <div class="summary-label">当前数据地点</div>
+      <div class="summary-value">{{ locations|length }}</div>
+      <div class="summary-note">本次通行数据中出现的抓拍地点数</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">本地卡口库</div>
+      <div class="summary-value">{{ checkpoint_library|length }}</div>
+      <div class="summary-note">来自首页导入并持久化到本机</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">当前命中卡口</div>
+      <div class="summary-value">{{ matched_checkpoints|length }}</div>
+      <div class="summary-note">本地卡口库与当前数据重合的卡口数</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">已选出入口</div>
+      <div class="summary-value">{{ 1 if selected_entry_checkpoint else 0 }} / {{ 1 if selected_exit_checkpoint else 0 }}</div>
+      <div class="summary-note">入口单选 / 出口单选</div>
+    </div>
+  </div>
+
+  {% if plate_types %}
+  <section class="section-card">
+    <div class="section-title">号牌种类排除</div>
+    <div class="section-hint">勾选后，对应号牌种类不会参与进出配对。</div>
+    <div class="checklist-panel">
+      <div class="checklist-grid">
+        {% for pt in plate_types %}
+        <label class="check-item">
+          <input type="checkbox" name="exclude_plate_types" value="{{ pt }}" form="filter-form" {% if config.exclude_plate_types is defined and pt in config.exclude_plate_types %}checked{% endif %}>
+          <span>{{ pt }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  <form action="{{ url_for('filter_results', data_id=data_id) }}" method="post" id="filter-form">
+    <div class="section-grid">
+      <section class="section-card" data-checkpoint-selector="entry">
+        <div class="section-title">入口卡口</div>
+        <div class="section-hint">输入关键词可实时过滤卡口列表，并即时更新匹配数量。入口卡口只能选择一个，当前数据中命中的卡口会优先排在列表前面。</div>
+        {% if checkpoint_library %}
+          <div class="search-stack">
+            <input type="search" placeholder="搜索入口卡口，如：东门、收费站、抓拍点" data-search-input>
+            <div class="search-meta">
+              <span data-search-status>正在加载匹配结果...</span>
+              <span>单选后作为入口参与配对</span>
+            </div>
+          </div>
+          <div class="checklist-panel checklist-panel-large">
+            <div class="checklist-grid">
+              {% for checkpoint in prioritized_checkpoint_library %}
+              <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                <input type="radio" name="entry_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_entry_checkpoint %}checked{% endif %}>
+                <span>{{ checkpoint }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+        {% else %}
+          <div class="empty-note">
+            <strong>暂无可选入口卡口</strong>
+            <p>请先返回首页导入卡口库。</p>
+          </div>
+        {% endif %}
+      </section>
+
+      <section class="section-card" data-checkpoint-selector="exit">
+        <div class="section-title">出口卡口</div>
+        <div class="section-hint">搜索结果会实时更新，便于快速定位出口卡口。出口卡口只能选择一个，当前数据中命中的卡口会优先排在列表前面。</div>
+        {% if checkpoint_library %}
+          <div class="search-stack">
+            <input type="search" placeholder="搜索出口卡口，如：西门、外环、离场点" data-search-input>
+            <div class="search-meta">
+              <span data-search-status>正在加载匹配结果...</span>
+              <span>单选一个出口，且不能与入口相同</span>
+            </div>
+          </div>
+          <div class="checklist-panel checklist-panel-large">
+            <div class="checklist-grid">
+              {% for checkpoint in prioritized_checkpoint_library %}
+              <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                <input type="radio" name="exit_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_exit_checkpoint %}checked{% endif %}>
+                <span>{{ checkpoint }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+        {% else %}
+          <div class="empty-note">
+            <strong>暂无可选出口卡口</strong>
+            <p>请先返回首页导入卡口库。</p>
+          </div>
+        {% endif %}
+      </section>
+    </div>
+
+    <div class="section-grid">
+      <section class="section-card">
+        <div class="section-title">筛选时间段</div>
+        <div class="section-hint">默认已回填当前通行数据最小时间到最大时间，只统计该时间段内的进出记录。</div>
+        <div class="helper-inline">
+          <span>从</span>
+          <input type="datetime-local" name="start_time" value="{{ start_time_value }}">
+          <span>到</span>
+          <input type="datetime-local" name="end_time" value="{{ end_time_value }}">
+        </div>
+      </section>
+
+      <section class="section-card">
+        <div class="section-title">目标过车间隔</div>
+        <div class="section-hint">越接近此间隔的进出记录，评分越高。高风险结果会在结果页和导出文件中显示警戒色。</div>
+        <label for="target_minutes">目标过车间隔（分钟）：</label>
+        <input type="number" name="target_minutes" id="target_minutes"
+               value="{{ config.target_minutes|default(default_max_minutes or 30) }}" min="1" step="1">
+        <small>当前数据命中的本地卡口：{{ matched_checkpoints|join('、') if matched_checkpoints else '暂无' }}</small>
+      </section>
+    </div>
+
+    <div class="action-strip">
+      <div>
+        <button type="submit" {% if not checkpoint_library %}disabled{% endif %}>开始筛选</button>
+        <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">返回首页</a>
+      </div>
+      <div class="toolbar-note">
+        搜索过滤仅影响显示，不会改动卡口库本身。提交时系统会校验入口、出口各只能且必须选择一个。
+      </div>
+    </div>
+  </form>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script>
+    (function () {
+      function initCheckpointSelector(section) {
+        const input = section.querySelector("[data-search-input]");
+        const status = section.querySelector("[data-search-status]");
+        const items = Array.from(section.querySelectorAll("[data-checkpoint-item]"));
+        const totalCurrent = items.filter((item) => item.dataset.current === "1").length;
+
+        if (!input || !status || !items.length) {
+          return;
+        }
+
+        function renderMatches() {
+          const query = input.value.trim().toLowerCase();
+          const matchedItems = [];
+          const currentMatchedItems = [];
+
+          items.forEach((item) => {
+            const text = item.dataset.search || "";
+            const matched = !query || text.includes(query);
+            item.classList.toggle("check-item-hidden", !matched);
+            if (matched) {
+              matchedItems.push(item);
+              if (item.dataset.current === "1") {
+                currentMatchedItems.push(item);
+              }
+            }
+          });
+
+          if (query) {
+            status.textContent = "实时匹配 " + matchedItems.length + " 个卡口，其中当前数据命中 " + currentMatchedItems.length + " 个";
+          } else {
+            status.textContent = "显示全部 " + items.length + " 个卡口，其中当前数据命中 " + totalCurrent + " 个";
+          }
+        }
+
+        input.addEventListener("input", renderMatches);
+        renderMatches();
+      }
+
+      document.querySelectorAll("[data-checkpoint-selector]").forEach(initCheckpointSelector);
+    })();
+  </script>
+{% endblock %}

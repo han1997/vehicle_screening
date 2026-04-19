@@ -21,7 +21,6 @@ CHECKPOINT_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "checkpoint_li
 
 # 简单的内存数据存储，适合本地单用户使用
 DATA_STORE = {}
-APP_STATE = {"checkpoint_import": None}
 
 RISK_LEVEL_META = {
     "red": {"label": "高风险", "style": 4},
@@ -143,19 +142,19 @@ def build_export_dataframe(filtered_df):
     else:
         export_df["号牌种类"] = ""
 
-    export_df["入口通行时间"] = pd.to_datetime(
+    export_df["第一卡口通行时间"] = pd.to_datetime(
         export_df["first_time"], errors="coerce"
     ).dt.strftime("%Y-%m-%d %H:%M:%S")
-    export_df["入口通行时间"] = export_df["入口通行时间"].fillna("")
+    export_df["第一卡口通行时间"] = export_df["第一卡口通行时间"].fillna("")
 
-    export_df["入口卡口"] = export_df["first_location"].astype(str)
+    export_df["第一卡口"] = export_df["first_location"].astype(str)
 
-    export_df["出口通行时间"] = pd.to_datetime(
+    export_df["第二卡口通行时间"] = pd.to_datetime(
         export_df["second_time"], errors="coerce"
     ).dt.strftime("%Y-%m-%d %H:%M:%S")
-    export_df["出口通行时间"] = export_df["出口通行时间"].fillna("")
+    export_df["第二卡口通行时间"] = export_df["第二卡口通行时间"].fillna("")
 
-    export_df["出口卡口"] = export_df["second_location"].astype(str)
+    export_df["第二卡口"] = export_df["second_location"].astype(str)
 
     export_df["时间间隔（分钟）"] = export_df["delta_minutes"].astype(float).round(2)
 
@@ -169,10 +168,10 @@ def build_export_dataframe(filtered_df):
     columns = [
         "车牌号",
         "号牌种类",
-        "入口通行时间",
-        "入口卡口",
-        "出口通行时间",
-        "出口卡口",
+        "第一卡口通行时间",
+        "第一卡口",
+        "第二卡口通行时间",
+        "第二卡口",
         "时间间隔（分钟）",
         "评分",
         "风险等级",
@@ -398,7 +397,7 @@ def find_matching_column(df, candidates):
 
 
 def parse_excel(path):
-    """读取并标准化 Excel 数据，返回包含 plate/time/location 三列的 DataFrame。"""
+    """读取并标准化 Excel 数据，返回标准化数据和原始列名。"""
     try:
         df = pd.read_excel(path)
     except Exception as exc:
@@ -406,6 +405,9 @@ def parse_excel(path):
 
     if df.empty:
         raise ValueError("Excel 文件为空。")
+
+    source_columns = [str(column).strip() for column in df.columns]
+    source_columns = [column for column in source_columns if column]
 
     plate_candidates = [
         "车牌号",
@@ -479,58 +481,55 @@ def parse_excel(path):
     df = df[df["plate"] != "无牌车"]
     df = df[df["plate"] != "未识别"]
 
-    return df
+    return df, source_columns
 
 
-def preview_checkpoint_excel(path):
-    """读取卡口 Excel 的列信息，供用户选择导入列。"""
-    try:
-        df = pd.read_excel(path, dtype=str)
-    except Exception as exc:
-        raise ValueError(f"无法读取卡口Excel文件: {exc}")
+def import_checkpoints_from_uploaded_files(filepaths, column_name):
+    """从本次上传的通行记录文件中按指定列导入卡口。"""
+    selected_column = str(column_name).strip()
+    if not selected_column:
+        raise ValueError("请选择要导入的卡口列。")
 
-    if df.empty:
-        raise ValueError("卡口 Excel 文件为空。")
+    imported_values = []
+    matched_file_count = 0
 
-    columns = [str(column).strip() for column in df.columns]
-    columns = [column for column in columns if column]
+    for path in filepaths:
+        try:
+            header_df = pd.read_excel(path, nrows=0)
+        except Exception as exc:
+            raise ValueError(f"读取已上传文件失败: {exc}")
 
-    if not columns:
-        raise ValueError("卡口 Excel 文件没有可用列名。")
+        normalized_map = {str(column).strip(): column for column in header_df.columns}
+        actual_column = normalized_map.get(selected_column)
+        if actual_column is None:
+            continue
 
-    return {"columns": columns, "row_count": int(len(df))}
+        try:
+            value_df = pd.read_excel(path, dtype=str, usecols=[actual_column])
+        except Exception as exc:
+            raise ValueError(f"读取列“{selected_column}”失败: {exc}")
 
+        matched_file_count += 1
+        imported_values.extend(value_df[actual_column].tolist())
 
-def import_checkpoints_from_excel(path, column_name):
-    """从指定 Excel 列中提取卡口名称。"""
-    try:
-        df = pd.read_excel(path, dtype=str)
-    except Exception as exc:
-        raise ValueError(f"无法读取卡口Excel文件: {exc}")
+    if matched_file_count == 0:
+        raise ValueError("所选列未出现在本次上传文件中，请重新选择。")
 
-    normalized_map = {str(column).strip(): column for column in df.columns}
-    actual_column = normalized_map.get(str(column_name).strip())
-    if actual_column is None:
-        raise ValueError("选择的卡口列不存在，请重新上传后再试。")
-
-    checkpoints = normalize_text_list(df[actual_column].tolist())
+    checkpoints = normalize_text_list(imported_values)
     if not checkpoints:
         raise ValueError("指定列中没有可导入的卡口名称。")
 
-    return checkpoints
+    return checkpoints, matched_file_count
 
 
 @app.route("/", methods=["GET"])
 def upload_form():
     """上传页面。"""
     checkpoint_library = load_checkpoint_library()
-    matched_home_checkpoints = normalize_text_list(
-        checkpoint_library[:12]
-    )
+    matched_home_checkpoints = checkpoint_library[:12]
     return render_template(
         "upload.html",
         checkpoint_library=checkpoint_library,
-        checkpoint_import=APP_STATE.get("checkpoint_import"),
         matched_home_checkpoints=matched_home_checkpoints,
     )
 
@@ -549,6 +548,9 @@ def upload():
         return redirect(url_for("upload_form"))
 
     dfs = []
+    uploaded_filepaths = []
+    source_columns = []
+    source_column_set = set()
 
     for file in files:
         if not allowed_file(file.filename):
@@ -556,14 +558,19 @@ def upload():
             return redirect(url_for("upload_form"))
 
         filepath = save_uploaded_excel(file)
+        uploaded_filepaths.append(filepath)
 
         try:
-            df_part = parse_excel(filepath)
+            df_part, file_columns = parse_excel(filepath)
         except ValueError as exc:
             flash(f"文件 {file.filename} 解析失败: {exc}")
             return redirect(url_for("upload_form"))
 
         dfs.append(df_part)
+        for column in file_columns:
+            if column not in source_column_set:
+                source_column_set.add(column)
+                source_columns.append(column)
 
     if not dfs:
         flash("未解析到任何有效数据。")
@@ -586,6 +593,9 @@ def upload():
         "locations": locations,
         "plate_types": plate_types,
         "filtered": None,
+        "uploaded_filepaths": uploaded_filepaths,
+        "source_columns": source_columns,
+        "last_imported_checkpoint_column": "",
         "default_max_minutes": default_max_minutes,
         "default_start_time": default_start_time,
         "default_end_time": default_end_time,
@@ -594,70 +604,41 @@ def upload():
     return redirect(url_for("review", data_id=data_id))
 
 
-@app.route("/checkpoint/upload", methods=["POST"])
-def upload_checkpoint_file():
-    """在首页上传卡口 Excel 并生成可选列预览。"""
-    checkpoint_file = request.files.get("checkpoint_file")
-    if checkpoint_file is None or not checkpoint_file.filename:
-        flash("请选择要导入的卡口 Excel 文件。")
+@app.route("/checkpoint/import/uploaded/<data_id>", methods=["POST"])
+def import_checkpoint_from_uploaded(data_id):
+    """从本次已上传通行记录中，按选择列导入卡口库。"""
+    data = DATA_STORE.get(data_id)
+    if not data:
+        flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
 
-    if not allowed_file(checkpoint_file.filename):
-        flash(f"文件 {checkpoint_file.filename} 不是支持的 Excel 格式。")
-        return redirect(url_for("upload_form"))
-
-    filepath = save_uploaded_excel(checkpoint_file)
-
-    try:
-        preview = preview_checkpoint_excel(filepath)
-    except ValueError as exc:
-        flash(str(exc))
-        return redirect(url_for("upload_form"))
-
-    APP_STATE["checkpoint_import"] = {
-        "filepath": filepath,
-        "filename": checkpoint_file.filename,
-        "columns": preview["columns"],
-        "row_count": preview["row_count"],
-        "selected_column": preview["columns"][0],
-    }
-
-    flash(
-        f"已读取卡口文件 {checkpoint_file.filename}，共发现 {preview['row_count']} 行数据，请选择要导入的列。"
-    )
-    return redirect(url_for("upload_form"))
-
-
-@app.route("/checkpoint/import", methods=["POST"])
-def import_checkpoint_column():
-    """在首页从已上传的卡口 Excel 中导入指定列到本地卡口库。"""
-    checkpoint_import = APP_STATE.get("checkpoint_import")
-    if not checkpoint_import:
-        flash("请先上传卡口 Excel 文件。")
-        return redirect(url_for("upload_form"))
-
-    column_name = request.form.get("checkpoint_column", "").strip()
+    column_name = request.form.get("checkpoint_source_column", "").strip()
     if not column_name:
         flash("请选择要导入的卡口列。")
+        return redirect(url_for("review", data_id=data_id))
+
+    filepaths = data.get("uploaded_filepaths", [])
+    if not filepaths:
+        flash("未找到本次上传文件，请重新上传后再试。")
         return redirect(url_for("upload_form"))
 
     try:
-        imported_checkpoints = import_checkpoints_from_excel(
-            checkpoint_import["filepath"], column_name
+        imported_checkpoints, matched_file_count = import_checkpoints_from_uploaded_files(
+            filepaths, column_name
         )
     except ValueError as exc:
         flash(str(exc))
-        return redirect(url_for("upload_form"))
+        return redirect(url_for("review", data_id=data_id))
 
     existing_checkpoints = load_checkpoint_library()
     merged_checkpoints = save_checkpoint_library(existing_checkpoints + imported_checkpoints)
     new_count = len(set(merged_checkpoints) - set(existing_checkpoints))
 
-    checkpoint_import["selected_column"] = column_name
+    data["last_imported_checkpoint_column"] = column_name
     flash(
-        f"卡口列“{column_name}”导入完成，本次识别 {len(imported_checkpoints)} 个卡口，新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
+        f"已从“{column_name}”导入卡口，匹配 {matched_file_count} 个文件，识别 {len(imported_checkpoints)} 个卡口，新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
     )
-    return redirect(url_for("upload_form"))
+    return redirect(url_for("review", data_id=data_id))
 
 
 @app.route("/review/<data_id>", methods=["GET"])
@@ -672,21 +653,29 @@ def review(data_id):
     start_time_value = config.get("start_time") or data.get("default_start_time", "")
     end_time_value = config.get("end_time") or data.get("default_end_time", "")
     checkpoint_library = load_checkpoint_library()
-    selected_entry_checkpoint = config.get("entry_checkpoint", "")
-    if not selected_entry_checkpoint:
+    selected_first_checkpoint = config.get("first_checkpoint", "")
+    if not selected_first_checkpoint:
+        legacy_first = config.get("entry_checkpoint", "")
+        if isinstance(legacy_first, str):
+            selected_first_checkpoint = legacy_first
+    if not selected_first_checkpoint:
         legacy_entry = config.get("entry_checkpoints", [])
         if isinstance(legacy_entry, list) and legacy_entry:
-            selected_entry_checkpoint = legacy_entry[0]
+            selected_first_checkpoint = legacy_entry[0]
         elif isinstance(legacy_entry, str):
-            selected_entry_checkpoint = legacy_entry
+            selected_first_checkpoint = legacy_entry
 
-    selected_exit_checkpoint = config.get("exit_checkpoint", "")
-    if not selected_exit_checkpoint:
+    selected_second_checkpoint = config.get("second_checkpoint", "")
+    if not selected_second_checkpoint:
+        legacy_second = config.get("exit_checkpoint", "")
+        if isinstance(legacy_second, str):
+            selected_second_checkpoint = legacy_second
+    if not selected_second_checkpoint:
         legacy_exit = config.get("exit_checkpoints", [])
         if isinstance(legacy_exit, list) and legacy_exit:
-            selected_exit_checkpoint = legacy_exit[0]
+            selected_second_checkpoint = legacy_exit[0]
         elif isinstance(legacy_exit, str):
-            selected_exit_checkpoint = legacy_exit
+            selected_second_checkpoint = legacy_exit
 
     current_locations = data.get("locations", [])
     matched_checkpoints = sorted(set(current_locations).intersection(checkpoint_library))
@@ -696,6 +685,10 @@ def review(data_id):
         for checkpoint in checkpoint_library
         if checkpoint not in matched_checkpoint_set
     ]
+    source_columns = data.get("source_columns", [])
+    selected_import_column = data.get("last_imported_checkpoint_column", "")
+    if not selected_import_column and source_columns:
+        selected_import_column = source_columns[0]
 
     return render_template(
         "review.html",
@@ -708,15 +701,17 @@ def review(data_id):
         end_time_value=end_time_value,
         checkpoint_library=checkpoint_library,
         prioritized_checkpoint_library=prioritized_checkpoint_library,
-        selected_entry_checkpoint=selected_entry_checkpoint,
-        selected_exit_checkpoint=selected_exit_checkpoint,
+        selected_first_checkpoint=selected_first_checkpoint,
+        selected_second_checkpoint=selected_second_checkpoint,
         matched_checkpoints=matched_checkpoints,
+        source_columns=source_columns,
+        selected_import_column=selected_import_column,
     )
 
 
 @app.route("/filter/<data_id>", methods=["POST"])
 def filter_results(data_id):
-    """根据本地卡口库中选定的入口/出口和时间窗口筛选车辆进出记录。"""
+    """根据本地卡口库中选定的第一/第二卡口和时间窗口筛选车辆记录。"""
     data = DATA_STORE.get(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
@@ -730,27 +725,31 @@ def filter_results(data_id):
     if exclude_plate_types and "plate_type" in df.columns:
         df = df[~df["plate_type"].isin(exclude_plate_types)]
 
-    entry_checkpoint = request.form.get("entry_checkpoint", "").strip()
-    exit_checkpoint = request.form.get("exit_checkpoint", "").strip()
+    first_checkpoint = request.form.get("first_checkpoint", "").strip()
+    second_checkpoint = request.form.get("second_checkpoint", "").strip()
+    if not first_checkpoint:
+        first_checkpoint = request.form.get("entry_checkpoint", "").strip()
+    if not second_checkpoint:
+        second_checkpoint = request.form.get("exit_checkpoint", "").strip()
 
-    if not entry_checkpoint or not exit_checkpoint:
-        flash("请分别选择一个入口卡口和一个出口卡口。")
+    if not first_checkpoint or not second_checkpoint:
+        flash("请分别选择第一卡口和第二卡口。")
         return redirect(url_for("review", data_id=data_id))
 
-    if entry_checkpoint not in checkpoint_library or exit_checkpoint not in checkpoint_library:
+    if first_checkpoint not in checkpoint_library or second_checkpoint not in checkpoint_library:
         flash("所选卡口不在本地卡口库中，请重新选择。")
         return redirect(url_for("review", data_id=data_id))
 
-    if entry_checkpoint == exit_checkpoint:
-        flash("同一卡口不能同时作为入口和出口，请重新选择。")
+    if first_checkpoint == second_checkpoint:
+        flash("第一卡口和第二卡口不能相同，请重新选择。")
         return redirect(url_for("review", data_id=data_id))
 
     current_data_locations = set(data.get("locations", []))
-    active_entry_locations = {entry_checkpoint}.intersection(current_data_locations)
-    active_exit_locations = {exit_checkpoint}.intersection(current_data_locations)
+    active_first_locations = {first_checkpoint}.intersection(current_data_locations)
+    active_second_locations = {second_checkpoint}.intersection(current_data_locations)
 
-    if not active_entry_locations or not active_exit_locations:
-        flash("所选入口或出口卡口未出现在当前通行数据中，请重新选择。")
+    if not active_first_locations or not active_second_locations:
+        flash("所选第一或第二卡口未出现在当前通行数据中，请重新选择。")
         return redirect(url_for("review", data_id=data_id))
 
     start_time_str = request.form.get("start_time")
@@ -774,24 +773,26 @@ def filter_results(data_id):
 
     DATA_STORE[data_id]["config"] = {
         "exclude_plate_types": exclude_plate_types,
-        "entry_checkpoint": entry_checkpoint,
-        "exit_checkpoint": exit_checkpoint,
+        "first_checkpoint": first_checkpoint,
+        "second_checkpoint": second_checkpoint,
+        "entry_checkpoint": first_checkpoint,  # 兼容历史字段
+        "exit_checkpoint": second_checkpoint,  # 兼容历史字段
         "start_time": start_time_str,
         "end_time": end_time_str,
         "target_minutes": target_minutes,
     }
 
-    valid_locations = active_entry_locations.union(active_exit_locations)
+    valid_locations = active_first_locations.union(active_second_locations)
     df_valid = df[df["location"].isin(valid_locations)].copy()
     df_valid = df_valid[(df_valid["time"] >= start_time) & (df_valid["time"] <= end_time)]
     df_valid = df_valid.sort_values("time")
 
     results = []
 
-    # 按车牌分组，寻找进出配对
+    # 按车牌分组，寻找第一卡口到第二卡口的时间顺序配对
     for plate, group in df_valid.groupby("plate"):
-        first_events = group[group["location"].isin(active_entry_locations)]
-        second_events = group[group["location"].isin(active_exit_locations)]
+        first_events = group[group["location"].isin(active_first_locations)]
+        second_events = group[group["location"].isin(active_second_locations)]
 
         if first_events.empty or second_events.empty:
             continue

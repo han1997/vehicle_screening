@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}配置出入卡口与筛选条件 - 车辆进出筛选工具{% endblock %}
+{% block title %}配置第一/第二卡口与筛选条件 - 车辆进出筛选工具{% endblock %}
 
 {% block content %}
   <div class="step-badge">步骤 2 / 3 · 配置卡口</div>
-  <h2>搜索并选择入口、出口卡口</h2>
-  <p class="subtext">卡口库已移到首页维护。当前页面只负责从本地卡口库中搜索、实时匹配并勾选入口与出口卡口，再设置筛选时间段和目标过车间隔。</p>
+  <h2>搜索并选择第一卡口、第二卡口</h2>
+  <p class="subtext">上传后可先用小按钮按列导入卡口库。当前页面负责从本地卡口库中搜索并勾选第一卡口与第二卡口，再设置筛选时间段和目标过车间隔。</p>
 
   <div class="summary-grid">
     <div class="summary-card">
@@ -16,7 +16,7 @@
     <div class="summary-card">
       <div class="summary-label">本地卡口库</div>
       <div class="summary-value">{{ checkpoint_library|length }}</div>
-      <div class="summary-note">来自首页导入并持久化到本机</div>
+      <div class="summary-note">持久保存在本机，可长期复用</div>
     </div>
     <div class="summary-card">
       <div class="summary-label">当前命中卡口</div>
@@ -24,16 +24,37 @@
       <div class="summary-note">本地卡口库与当前数据重合的卡口数</div>
     </div>
     <div class="summary-card">
-      <div class="summary-label">已选出入口</div>
-      <div class="summary-value">{{ 1 if selected_entry_checkpoint else 0 }} / {{ 1 if selected_exit_checkpoint else 0 }}</div>
-      <div class="summary-note">入口单选 / 出口单选</div>
+      <div class="summary-label">已选卡口</div>
+      <div class="summary-value">{{ 1 if selected_first_checkpoint else 0 }} / {{ 1 if selected_second_checkpoint else 0 }}</div>
+      <div class="summary-note">第一卡口单选 / 第二卡口单选</div>
     </div>
   </div>
+
+  <section class="section-card">
+    <div class="section-title">卡口库导入</div>
+    <div class="section-hint">按需从本次上传通行记录中选择一列导入本地卡口库，导入后可立即参与下方卡口搜索与筛选。</div>
+    {% if source_columns %}
+      <form action="{{ url_for('import_checkpoint_from_uploaded', data_id=data_id) }}" method="post" class="helper-inline">
+        <label for="checkpoint_source_column" style="margin-bottom: 0;">导入列：</label>
+        <select name="checkpoint_source_column" id="checkpoint_source_column" style="max-width: 260px;">
+          {% for column in source_columns %}
+            <option value="{{ column }}" {% if selected_import_column == column %}selected{% endif %}>{{ column }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-ghost btn-small">导入卡口库</button>
+      </form>
+    {% else %}
+      <div class="empty-note">
+        <strong>未识别到可导入列</strong>
+        <p>请返回首页重新上传通行记录文件。</p>
+      </div>
+    {% endif %}
+  </section>
 
   {% if plate_types %}
   <section class="section-card">
     <div class="section-title">号牌种类排除</div>
-    <div class="section-hint">勾选后，对应号牌种类不会参与进出配对。</div>
+    <div class="section-hint">勾选后，对应号牌种类不会参与配对计算。</div>
     <div class="checklist-panel">
       <div class="checklist-grid">
         {% for pt in plate_types %}
@@ -49,22 +70,22 @@
 
   <form action="{{ url_for('filter_results', data_id=data_id) }}" method="post" id="filter-form">
     <div class="section-grid">
-      <section class="section-card" data-checkpoint-selector="entry">
-        <div class="section-title">入口卡口</div>
-        <div class="section-hint">输入关键词可实时过滤卡口列表，并即时更新匹配数量。入口卡口只能选择一个，当前数据中命中的卡口会优先排在列表前面。</div>
+      <section class="section-card" data-checkpoint-selector="first">
+        <div class="section-title">第一卡口</div>
+        <div class="section-hint">输入关键词可实时过滤卡口列表，并即时更新匹配数量。第一卡口只能选择一个，当前数据中命中的卡口会优先排在列表前面。</div>
         {% if checkpoint_library %}
           <div class="search-stack">
-            <input type="search" placeholder="搜索入口卡口，如：东门、收费站、抓拍点" data-search-input>
+            <input type="search" placeholder="搜索第一卡口，如：东门、收费站、抓拍点" data-search-input>
             <div class="search-meta">
               <span data-search-status>正在加载匹配结果...</span>
-              <span>单选后作为入口参与配对</span>
+              <span>单选后作为第一卡口参与配对</span>
             </div>
           </div>
           <div class="checklist-panel checklist-panel-large">
             <div class="checklist-grid">
               {% for checkpoint in prioritized_checkpoint_library %}
               <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
-                <input type="radio" name="entry_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_entry_checkpoint %}checked{% endif %}>
+                <input type="radio" name="first_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_first_checkpoint %}checked{% endif %}>
                 <span>{{ checkpoint }}</span>
               </label>
               {% endfor %}
@@ -72,28 +93,28 @@
           </div>
         {% else %}
           <div class="empty-note">
-            <strong>暂无可选入口卡口</strong>
-            <p>请先返回首页导入卡口库。</p>
+            <strong>暂无可选第一卡口</strong>
+            <p>请先使用上方小按钮导入卡口库。</p>
           </div>
         {% endif %}
       </section>
 
-      <section class="section-card" data-checkpoint-selector="exit">
-        <div class="section-title">出口卡口</div>
-        <div class="section-hint">搜索结果会实时更新，便于快速定位出口卡口。出口卡口只能选择一个，当前数据中命中的卡口会优先排在列表前面。</div>
+      <section class="section-card" data-checkpoint-selector="second">
+        <div class="section-title">第二卡口</div>
+        <div class="section-hint">搜索结果会实时更新，便于快速定位第二卡口。第二卡口只能选择一个，且不能与第一卡口相同。</div>
         {% if checkpoint_library %}
           <div class="search-stack">
-            <input type="search" placeholder="搜索出口卡口，如：西门、外环、离场点" data-search-input>
+            <input type="search" placeholder="搜索第二卡口，如：西门、外环、离场点" data-search-input>
             <div class="search-meta">
               <span data-search-status>正在加载匹配结果...</span>
-              <span>单选一个出口，且不能与入口相同</span>
+              <span>单选后作为第二卡口参与配对</span>
             </div>
           </div>
           <div class="checklist-panel checklist-panel-large">
             <div class="checklist-grid">
               {% for checkpoint in prioritized_checkpoint_library %}
               <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
-                <input type="radio" name="exit_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_exit_checkpoint %}checked{% endif %}>
+                <input type="radio" name="second_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_second_checkpoint %}checked{% endif %}>
                 <span>{{ checkpoint }}</span>
               </label>
               {% endfor %}
@@ -101,8 +122,8 @@
           </div>
         {% else %}
           <div class="empty-note">
-            <strong>暂无可选出口卡口</strong>
-            <p>请先返回首页导入卡口库。</p>
+            <strong>暂无可选第二卡口</strong>
+            <p>请先使用上方小按钮导入卡口库。</p>
           </div>
         {% endif %}
       </section>
@@ -111,7 +132,7 @@
     <div class="section-grid">
       <section class="section-card">
         <div class="section-title">筛选时间段</div>
-        <div class="section-hint">默认已回填当前通行数据最小时间到最大时间，只统计该时间段内的进出记录。</div>
+        <div class="section-hint">默认已回填当前通行数据最小时间到最大时间，只统计该时间段内的卡口记录。</div>
         <div class="helper-inline">
           <span>从</span>
           <input type="datetime-local" name="start_time" value="{{ start_time_value }}">
@@ -122,7 +143,7 @@
 
       <section class="section-card">
         <div class="section-title">目标过车间隔</div>
-        <div class="section-hint">越接近此间隔的进出记录，评分越高。高风险结果会在结果页和导出文件中显示警戒色。</div>
+        <div class="section-hint">越接近此间隔的卡口记录配对，评分越高。高风险结果会在结果页和导出文件中显示警戒色。</div>
         <label for="target_minutes">目标过车间隔（分钟）：</label>
         <input type="number" name="target_minutes" id="target_minutes"
                value="{{ config.target_minutes|default(default_max_minutes or 30) }}" min="1" step="1">
@@ -136,7 +157,7 @@
         <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">返回首页</a>
       </div>
       <div class="toolbar-note">
-        搜索过滤仅影响显示，不会改动卡口库本身。提交时系统会校验入口、出口各只能且必须选择一个。
+        搜索过滤仅影响显示，不会改动卡口库本身。提交时系统会校验第一卡口和第二卡口必须各选一个且不能相同。
       </div>
     </div>
   </form>

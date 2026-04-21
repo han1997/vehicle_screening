@@ -12,7 +12,7 @@ from flask import Flask, render_template, request, redirect, url_for, send_file,
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "change-this-secret"  # 本地使用即可，如需部署请修改
 app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
 
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
@@ -169,6 +169,37 @@ def parse_clock_window(start_clock_str, end_clock_str):
     return start_clock, end_clock
 
 
+def split_clock_value(clock_str, default_hour="00", default_minute="00"):
+    """将 HH:MM 拆分为小时和分钟文本。"""
+    text = normalize_text_value(clock_str)
+    if text:
+        try:
+            parsed = datetime.strptime(text, "%H:%M").time()
+            return f"{parsed.hour:02d}", f"{parsed.minute:02d}"
+        except ValueError:
+            pass
+    return default_hour, default_minute
+
+
+def compose_clock_value(hour_text, minute_text):
+    """由小时与分钟文本拼接 HH:MM。"""
+    hour_raw = normalize_text_value(hour_text)
+    minute_raw = normalize_text_value(minute_text)
+    if not hour_raw or not minute_raw:
+        return ""
+
+    try:
+        hour = int(hour_raw)
+        minute = int(minute_raw)
+    except ValueError:
+        return ""
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return ""
+
+    return f"{hour:02d}:{minute:02d}"
+
+
 def clock_to_minutes(clock_value):
     """将时分秒转为分钟（向下取整到分钟）。"""
     return clock_value.hour * 60 + clock_value.minute
@@ -233,6 +264,36 @@ def save_checkpoint_library(checkpoints):
     return normalized
 
 
+def prune_removed_checkpoints_from_config(config, removed_checkpoints):
+    """移除配置中已删除的卡口引用。"""
+    if not isinstance(config, dict):
+        return {}
+
+    removed_set = set(removed_checkpoints or [])
+    if not removed_set:
+        return config
+
+    first_checkpoint = normalize_text_value(config.get("first_checkpoint"))
+    second_checkpoint = normalize_text_value(config.get("second_checkpoint"))
+    entry_checkpoint = normalize_text_value(config.get("entry_checkpoint"))
+    exit_checkpoint = normalize_text_value(config.get("exit_checkpoint"))
+
+    if first_checkpoint in removed_set:
+        config["first_checkpoint"] = ""
+    if second_checkpoint in removed_set:
+        config["second_checkpoint"] = ""
+    if entry_checkpoint in removed_set:
+        config["entry_checkpoint"] = ""
+    if exit_checkpoint in removed_set:
+        config["exit_checkpoint"] = ""
+
+    frequent_checkpoints = normalize_choice_list(config.get("frequent_checkpoints", []))
+    config["frequent_checkpoints"] = [
+        checkpoint for checkpoint in frequent_checkpoints if checkpoint not in removed_set
+    ]
+    return config
+
+
 def save_uploaded_excel(file_storage):
     """保存上传的 Excel 文件并返回路径。"""
     ext = file_storage.filename.rsplit(".", 1)[1].lower()
@@ -252,6 +313,15 @@ def format_datetime_local(value):
 def get_risk_label(level):
     """将内部风险级别映射为展示文案。"""
     return RISK_LEVEL_META.get(level, {}).get("label", "")
+
+
+def get_frequent_level(occurrence_count, threshold):
+    """根据出现次数返回频繁模式分级。"""
+    if occurrence_count >= threshold + 3:
+        return "red", "高频"
+    if occurrence_count >= threshold + 1:
+        return "yellow", "关注"
+    return "blue", "达标"
 
 
 def build_results_summary(df):
@@ -296,22 +366,28 @@ def build_frequent_results_summary(df, matched_records, threshold):
     if df is None or df.empty:
         return summary
 
-    summary["total_vehicles"] = int(len(df))
+    summary["total_occurrences"] = int(len(df))
 
-    if "occurrence_count" in df.columns:
-        occurrence_series = pd.to_numeric(df["occurrence_count"], errors="coerce").dropna()
+    if "plate" in df.columns:
+        vehicle_df = df.drop_duplicates(subset=["plate"])
+    else:
+        vehicle_df = df.copy()
+
+    summary["total_vehicles"] = int(len(vehicle_df))
+
+    if "occurrence_count" in vehicle_df.columns:
+        occurrence_series = pd.to_numeric(vehicle_df["occurrence_count"], errors="coerce").dropna()
     else:
         occurrence_series = pd.Series(dtype=float)
 
-    if "checkpoint_count" in df.columns:
-        checkpoint_series = pd.to_numeric(df["checkpoint_count"], errors="coerce").dropna()
+    if "checkpoint_count" in vehicle_df.columns:
+        checkpoint_series = pd.to_numeric(vehicle_df["checkpoint_count"], errors="coerce").dropna()
     else:
         checkpoint_series = pd.Series(dtype=float)
 
     if not occurrence_series.empty:
         summary["max_occurrence"] = int(occurrence_series.max())
         summary["avg_occurrence"] = round(float(occurrence_series.mean()), 2)
-        summary["total_occurrences"] = int(occurrence_series.sum())
 
     if not checkpoint_series.empty:
         summary["multi_checkpoint_vehicles"] = int((checkpoint_series >= 2).sum())
@@ -411,7 +487,6 @@ def build_frequent_filtered_dataframe(
     end_clock,
     active_checkpoints,
     min_occurrence,
-    selected_export_columns,
 ):
     """多卡口频繁出现模式计算。"""
     df_valid = df[df["location"].isin(set(active_checkpoints))].copy()
@@ -429,13 +504,15 @@ def build_frequent_filtered_dataframe(
     df_valid = df_valid.sort_values("time")
     matched_records = int(len(df_valid))
 
-    results = []
+    detail_rows = []
+    filtered_vehicle_count = 0
 
-    for plate, group in df_valid.groupby("plate"):
+    for plate, group in df_valid.groupby("plate", sort=False):
         occurrence_count = int(len(group))
         if occurrence_count < min_occurrence:
             continue
 
+        filtered_vehicle_count += 1
         group_sorted = group.sort_values("time")
         first_time = group_sorted["time"].iloc[0]
         last_time = group_sorted["time"].iloc[-1]
@@ -445,51 +522,61 @@ def build_frequent_filtered_dataframe(
         checkpoint_summary = "、".join(
             f"{location} × {int(count)}" for location, count in checkpoint_counts.items()
         )
+        group_size = int(len(group_sorted))
+        summary_plate_type = merge_distinct_values(group_sorted["plate_type"].tolist())
 
-        source_values = {}
-        for column in selected_export_columns:
-            key = source_column_key(column)
-            if key in group_sorted.columns:
-                source_values[column] = merge_distinct_values(group_sorted[key].tolist())
-            else:
-                source_values[column] = ""
+        for idx, row in enumerate(group_sorted.to_dict(orient="records")):
+            detail_rows.append(
+                {
+                    "plate": plate,
+                    "plate_type_summary": summary_plate_type,
+                    "occurrence_count": occurrence_count,
+                    "first_time": first_time,
+                    "last_time": last_time,
+                    "duration_minutes": round(duration_minutes, 2),
+                    "checkpoint_count": int(checkpoint_counts.size),
+                    "checkpoint_summary": checkpoint_summary,
+                    "event_time": row.get("time"),
+                    "event_location": normalize_text_value(row.get("location")),
+                    "event_plate_type": normalize_text_value(row.get("plate_type")),
+                    "group_row_index": idx,
+                    "group_size": group_size,
+                    "group_first": idx == 0,
+                }
+            )
 
-        results.append(
-            {
-                "plate": plate,
-                "plate_type": merge_distinct_values(group_sorted["plate_type"].tolist()),
-                "occurrence_count": occurrence_count,
-                "first_time": first_time,
-                "last_time": last_time,
-                "duration_minutes": round(duration_minutes, 2),
-                "checkpoint_count": int(checkpoint_counts.size),
-                "checkpoint_summary": checkpoint_summary,
-                "source_values": source_values,
-            }
-        )
+            for column in df.columns:
+                if not str(column).startswith(SOURCE_COLUMN_PREFIX):
+                    continue
+                detail_rows[-1][column] = row.get(column)
 
-    if results:
-        filtered_df = pd.DataFrame(results)
+    if detail_rows:
+        filtered_df = pd.DataFrame(detail_rows)
         filtered_df = filtered_df.sort_values(
-            ["occurrence_count", "checkpoint_count", "last_time"],
-            ascending=[False, False, False],
+            ["occurrence_count", "checkpoint_count", "plate", "event_time"],
+            ascending=[False, False, True, True],
         )
     else:
         filtered_df = pd.DataFrame(
             columns=[
                 "plate",
-                "plate_type",
+                "plate_type_summary",
                 "occurrence_count",
                 "first_time",
                 "last_time",
                 "duration_minutes",
                 "checkpoint_count",
                 "checkpoint_summary",
-                "source_values",
+                "event_time",
+                "event_location",
+                "event_plate_type",
+                "group_row_index",
+                "group_size",
+                "group_first",
             ]
         )
 
-    return filtered_df, matched_records
+    return filtered_df, matched_records, filtered_vehicle_count
 
 
 def build_pair_display_results(filtered_df):
@@ -524,38 +611,37 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
 
     for row in filtered_df.to_dict(orient="records"):
         occurrence_count = int(row.get("occurrence_count", 0) or 0)
-        if occurrence_count >= threshold + 3:
-            level = "red"
-            level_label = "高频"
-        elif occurrence_count >= threshold + 1:
-            level = "yellow"
-            level_label = "关注"
-        else:
-            level = "blue"
-            level_label = "达标"
+        level, level_label = get_frequent_level(occurrence_count, threshold)
+        group_size = int(row.get("group_size", 1) or 1)
+        group_first = bool(row.get("group_first", False))
 
-        source_values = row.get("source_values", {})
-        if not isinstance(source_values, dict):
-            source_values = {}
-
-        merged_columns = [
-            {"name": column, "value": normalize_text_value(source_values.get(column, ""))}
-            for column in selected_export_columns
-        ]
+        detail_columns = []
+        for column in selected_export_columns:
+            detail_columns.append(
+                {
+                    "name": column,
+                    "value": normalize_text_value(row.get(source_column_key(column), "")),
+                }
+            )
 
         display_results.append(
             {
                 "plate": normalize_text_value(row.get("plate", "")),
-                "plate_type": normalize_text_value(row.get("plate_type", "")),
+                "plate_type": normalize_text_value(row.get("plate_type_summary", "")),
                 "occurrence_count": occurrence_count,
                 "first_time": format_datetime_string(row.get("first_time")),
                 "last_time": format_datetime_string(row.get("last_time")),
                 "duration_minutes": float(row.get("duration_minutes", 0.0) or 0.0),
                 "checkpoint_count": int(row.get("checkpoint_count", 0) or 0),
                 "checkpoint_summary": normalize_text_value(row.get("checkpoint_summary", "")),
+                "event_time": format_datetime_string(row.get("event_time")),
+                "event_location": normalize_text_value(row.get("event_location", "")),
+                "event_plate_type": normalize_text_value(row.get("event_plate_type", "")),
                 "level": level,
                 "level_label": level_label,
-                "merged_columns": merged_columns,
+                "group_size": group_size,
+                "group_first": group_first,
+                "detail_columns": detail_columns,
             }
         )
 
@@ -615,9 +701,9 @@ def build_export_dataframe(filtered_df):
     return export_df[columns], risk_levels
 
 
-def build_frequent_export_dataframe(filtered_df, selected_export_columns):
-    """构造频繁出现模式导出表。"""
-    base_columns = [
+def build_frequent_export_dataframe(filtered_df, selected_export_columns, threshold):
+    """构造频繁出现模式导出表，并返回需要合并的单元格信息。"""
+    summary_columns = [
         "车牌号",
         "号牌种类",
         "出现次数",
@@ -626,36 +712,57 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns):
         "覆盖时长（分钟）",
         "涉及卡口数",
         "卡口分布",
+        "频次级别",
     ]
-    all_columns = base_columns + selected_export_columns
+    detail_columns = [
+        "本条抓拍时间",
+        "本条卡口",
+        "本条号牌种类",
+    ]
+    all_columns = summary_columns + detail_columns + selected_export_columns
 
     if filtered_df is None or filtered_df.empty:
-        return pd.DataFrame(columns=all_columns)
+        return pd.DataFrame(columns=all_columns), []
 
     export_rows = []
+    merge_ranges = []
+    excel_row = 2
+
     for row in filtered_df.to_dict(orient="records"):
-        source_values = row.get("source_values", {})
-        if not isinstance(source_values, dict):
-            source_values = {}
+        occurrence_count = int(row.get("occurrence_count", 0) or 0)
+        _, level_label = get_frequent_level(occurrence_count, threshold)
 
         export_row = {
             "车牌号": normalize_text_value(row.get("plate", "")),
-            "号牌种类": normalize_text_value(row.get("plate_type", "")),
-            "出现次数": int(row.get("occurrence_count", 0) or 0),
+            "号牌种类": normalize_text_value(row.get("plate_type_summary", "")),
+            "出现次数": occurrence_count,
             "首次出现时间": format_datetime_string(row.get("first_time")),
             "最后出现时间": format_datetime_string(row.get("last_time")),
             "覆盖时长（分钟）": round(float(row.get("duration_minutes", 0.0) or 0.0), 2),
             "涉及卡口数": int(row.get("checkpoint_count", 0) or 0),
             "卡口分布": normalize_text_value(row.get("checkpoint_summary", "")),
+            "频次级别": level_label,
+            "本条抓拍时间": format_datetime_string(row.get("event_time")),
+            "本条卡口": normalize_text_value(row.get("event_location", "")),
+            "本条号牌种类": normalize_text_value(row.get("event_plate_type", "")),
         }
 
         for column in selected_export_columns:
-            export_row[column] = normalize_text_value(source_values.get(column, ""))
+            export_row[column] = normalize_text_value(row.get(source_column_key(column), ""))
 
         export_rows.append(export_row)
+        if bool(row.get("group_first", False)):
+            group_size = int(row.get("group_size", 1) or 1)
+            if group_size > 1:
+                start_row = excel_row
+                end_row = excel_row + group_size - 1
+                for column in summary_columns:
+                    col_idx = all_columns.index(column) + 1
+                    merge_ranges.append((start_row, end_row, col_idx))
+        excel_row += 1
 
     export_df = pd.DataFrame(export_rows)
-    return export_df[all_columns]
+    return export_df[all_columns], merge_ranges
 
 
 def excel_column_name(index):
@@ -865,11 +972,20 @@ def build_warning_workbook(export_df, risk_levels, summary):
     return output
 
 
-def build_plain_workbook(export_df, sheet_name):
-    """生成普通 xlsx 文件。"""
+def build_plain_workbook(export_df, sheet_name, merge_ranges=None):
+    """生成普通 xlsx 文件，可选合并单元格。"""
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name=sheet_name)
+        if merge_ranges:
+            worksheet = writer.book[sheet_name]
+            for start_row, end_row, column_idx in merge_ranges:
+                worksheet.merge_cells(
+                    start_row=int(start_row),
+                    end_row=int(end_row),
+                    start_column=int(column_idx),
+                    end_column=int(column_idx),
+                )
     output.seek(0)
     return output
 
@@ -1149,6 +1265,38 @@ def import_checkpoint_from_uploaded(data_id):
     return redirect(url_for("review", data_id=data_id))
 
 
+@app.route("/checkpoint/delete/<data_id>", methods=["POST"])
+def delete_checkpoints_from_library(data_id):
+    """从本地卡口库删除选中的卡口。"""
+    data = DATA_STORE.get(data_id)
+    if not data:
+        flash("数据已过期或不存在，请重新上传文件。")
+        return redirect(url_for("upload_form"))
+
+    checkpoint_library = load_checkpoint_library()
+    selected_checkpoints = normalize_choice_list(
+        request.form.getlist("delete_checkpoints"),
+        checkpoint_library,
+    )
+    if not selected_checkpoints:
+        flash("请先选择要删除的卡口。")
+        return redirect(url_for("review", data_id=data_id))
+
+    removed_set = set(selected_checkpoints)
+    remaining_checkpoints = [
+        checkpoint for checkpoint in checkpoint_library if checkpoint not in removed_set
+    ]
+    updated_library = save_checkpoint_library(remaining_checkpoints)
+
+    config = data.get("config", {})
+    data["config"] = prune_removed_checkpoints_from_config(config, selected_checkpoints)
+
+    flash(
+        f"已删除 {len(selected_checkpoints)} 个卡口，本地卡口库剩余 {len(updated_library)} 个。"
+    )
+    return redirect(url_for("review", data_id=data_id))
+
+
 @app.route("/review/<data_id>", methods=["GET"])
 def review(data_id):
     """展示卡口库与筛选条件配置页面。"""
@@ -1174,6 +1322,12 @@ def review(data_id):
     frequent_end_clock_value = normalize_text_value(
         config.get("frequent_end_clock", DEFAULT_FREQUENT_END_CLOCK)
     ) or DEFAULT_FREQUENT_END_CLOCK
+    frequent_start_hour_value, frequent_start_minute_value = split_clock_value(
+        frequent_start_clock_value, default_hour="00", default_minute="00"
+    )
+    frequent_end_hour_value, frequent_end_minute_value = split_clock_value(
+        frequent_end_clock_value, default_hour="23", default_minute="59"
+    )
     checkpoint_library = load_checkpoint_library()
     selected_first_checkpoint = config.get("first_checkpoint", "")
     if not selected_first_checkpoint:
@@ -1256,6 +1410,10 @@ def review(data_id):
         target_minutes_value=target_minutes_value,
         frequent_start_clock_value=frequent_start_clock_value,
         frequent_end_clock_value=frequent_end_clock_value,
+        frequent_start_hour_value=frequent_start_hour_value,
+        frequent_start_minute_value=frequent_start_minute_value,
+        frequent_end_hour_value=frequent_end_hour_value,
+        frequent_end_minute_value=frequent_end_minute_value,
         matched_checkpoints=matched_checkpoints,
         source_columns=source_columns,
         selected_import_column=selected_import_column,
@@ -1390,6 +1548,16 @@ def filter_results(data_id):
 
     frequent_start_clock_str = normalize_text_value(request.form.get("frequent_start_clock"))
     frequent_end_clock_str = normalize_text_value(request.form.get("frequent_end_clock"))
+    if not frequent_start_clock_str:
+        frequent_start_clock_str = compose_clock_value(
+            request.form.get("frequent_start_hour"),
+            request.form.get("frequent_start_minute"),
+        )
+    if not frequent_end_clock_str:
+        frequent_end_clock_str = compose_clock_value(
+            request.form.get("frequent_end_hour"),
+            request.form.get("frequent_end_minute"),
+        )
     try:
         frequent_start_clock, frequent_end_clock = parse_clock_window(
             frequent_start_clock_str, frequent_end_clock_str
@@ -1404,22 +1572,20 @@ def filter_results(data_id):
     if not selected_export_columns:
         selected_export_columns = pick_default_export_columns(source_columns)
 
-    filtered_df, matched_records = build_frequent_filtered_dataframe(
+    filtered_df, matched_records, filtered_vehicle_count = build_frequent_filtered_dataframe(
         df=df,
         start_clock=frequent_start_clock,
         end_clock=frequent_end_clock,
         active_checkpoints=active_checkpoints,
         min_occurrence=min_occurrence,
-        selected_export_columns=selected_export_columns,
     )
     display_results = build_frequent_display_results(
         filtered_df,
         threshold=min_occurrence,
         selected_export_columns=selected_export_columns,
     )
-    summary = build_frequent_results_summary(
-        filtered_df, matched_records=matched_records, threshold=min_occurrence
-    )
+    summary = build_frequent_results_summary(filtered_df, matched_records=matched_records, threshold=min_occurrence)
+    summary["total_vehicles"] = filtered_vehicle_count
 
     config.update(
         {
@@ -1469,8 +1635,22 @@ def download(data_id):
         if not selected_export_columns:
             selected_export_columns = pick_default_export_columns(source_columns)
 
-        export_df = build_frequent_export_dataframe(filtered_df, selected_export_columns)
-        output = build_plain_workbook(export_df, sheet_name="频繁出现车辆")
+        try:
+            threshold = int(config.get("min_occurrence", DEFAULT_FREQUENT_OCCURRENCE))
+        except (TypeError, ValueError):
+            threshold = DEFAULT_FREQUENT_OCCURRENCE
+        if threshold <= 0:
+            threshold = DEFAULT_FREQUENT_OCCURRENCE
+        export_df, merge_ranges = build_frequent_export_dataframe(
+            filtered_df,
+            selected_export_columns,
+            threshold=threshold,
+        )
+        output = build_plain_workbook(
+            export_df,
+            sheet_name="频繁出现车辆",
+            merge_ranges=merge_ranges,
+        )
         filename = "频繁出现车辆筛选结果.xlsx"
     else:
         export_df, risk_levels = build_export_dataframe(filtered_df)

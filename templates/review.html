@@ -57,9 +57,47 @@
     {% endif %}
   </section>
 
+  <section class="section-card">
+    <div class="section-title section-title-inline">
+      <span>本地卡口库管理</span>
+      <span class="selection-tag multi">多选删除</span>
+    </div>
+    <div class="section-hint">用于处理误导入或冗余卡口。删除后会立即从本地卡口库移除。</div>
+    {% if checkpoint_library %}
+      <form action="{{ url_for('delete_checkpoints_from_library', data_id=data_id) }}" method="post">
+        <div class="checklist-panel checklist-panel-large">
+          <div class="checklist-grid">
+            {% for checkpoint in prioritized_checkpoint_library %}
+            <label class="check-item">
+              <input type="checkbox" name="delete_checkpoints" value="{{ checkpoint }}">
+              <span>{{ checkpoint }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="action-strip" style="margin-top: 12px;">
+          <div>
+            <button type="submit" class="btn btn-ghost">删除选中卡口</button>
+          </div>
+          <div class="toolbar-note">
+            删除操作仅影响本地卡口库，不会改动本次上传的原始通行数据。
+          </div>
+        </div>
+      </form>
+    {% else %}
+      <div class="empty-note">
+        <strong>本地卡口库为空</strong>
+        <p>可先通过上方“卡口库导入”添加，再在此处管理。</p>
+      </div>
+    {% endif %}
+  </section>
+
   {% if plate_types %}
   <section class="section-card">
-    <div class="section-title">号牌种类排除</div>
+    <div class="section-title section-title-inline">
+      <span>号牌种类排除</span>
+      <span class="selection-tag multi">多选</span>
+    </div>
     <div class="section-hint">勾选后，对应号牌种类不会参与筛选计算。</div>
     <div class="checklist-panel">
       <div class="checklist-grid">
@@ -76,7 +114,10 @@
 
   <form action="{{ url_for('filter_results', data_id=data_id) }}" method="post" id="filter-form">
     <section class="section-card">
-      <div class="section-title">筛选模式</div>
+      <div class="section-title section-title-inline">
+        <span>筛选模式</span>
+        <span class="selection-tag">单选</span>
+      </div>
       <div class="section-hint">可随时切换。系统会记住你上次在两种模式下填写的参数。</div>
       <div class="choice-row">
         <label class="choice-card">
@@ -110,7 +151,10 @@
 
       <div class="section-grid">
         <section class="section-card" data-checkpoint-selector="first">
-          <div class="section-title">第一卡口</div>
+          <div class="section-title section-title-inline">
+            <span>第一卡口</span>
+            <span class="selection-tag">单选</span>
+          </div>
           <div class="section-hint">输入关键词可实时过滤卡口列表。第一卡口只能选择一个。</div>
           {% if checkpoint_library %}
             <div class="search-stack">
@@ -139,7 +183,10 @@
         </section>
 
         <section class="section-card" data-checkpoint-selector="second">
-          <div class="section-title">第二卡口</div>
+          <div class="section-title section-title-inline">
+            <span>第二卡口</span>
+            <span class="selection-tag">单选</span>
+          </div>
           <div class="section-hint">搜索结果会实时更新。第二卡口只能选择一个，且不能与第一卡口相同。</div>
           {% if checkpoint_library %}
             <div class="search-stack">
@@ -182,16 +229,52 @@
       <section class="section-card">
         <div class="section-title">日内时段（频繁模式）</div>
         <div class="section-hint">按 24 小时制设置时段，仅比较每天的时分；支持跨天，例如 20:00 到 04:00。</div>
-        <div class="helper-inline">
-          <span>从</span>
-          <input type="time" name="frequent_start_clock" value="{{ frequent_start_clock_value }}" step="60">
-          <span>到</span>
-          <input type="time" name="frequent_end_clock" value="{{ frequent_end_clock_value }}" step="60">
+        <div class="clock-grid">
+          <div class="clock-card">
+            <div class="clock-card-title">开始时间</div>
+            <div class="clock-row">
+              <select name="frequent_start_hour" class="clock-select">
+                {% for hour in range(24) %}
+                  {% set hour_text = "%02d"|format(hour) %}
+                  <option value="{{ hour_text }}" {% if frequent_start_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
+                {% endfor %}
+              </select>
+              <span class="clock-colon">:</span>
+              <select name="frequent_start_minute" class="clock-select">
+                {% for minute in range(60) %}
+                  {% set minute_text = "%02d"|format(minute) %}
+                  <option value="{{ minute_text }}" {% if frequent_start_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="clock-card">
+            <div class="clock-card-title">结束时间</div>
+            <div class="clock-row">
+              <select name="frequent_end_hour" class="clock-select">
+                {% for hour in range(24) %}
+                  {% set hour_text = "%02d"|format(hour) %}
+                  <option value="{{ hour_text }}" {% if frequent_end_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
+                {% endfor %}
+              </select>
+              <span class="clock-colon">:</span>
+              <select name="frequent_end_minute" class="clock-select">
+                {% for minute in range(60) %}
+                  {% set minute_text = "%02d"|format(minute) %}
+                  <option value="{{ minute_text }}" {% if frequent_end_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
         </div>
+        <small>示例：20:00-04:00 表示夜间跨天时段。</small>
       </section>
 
       <section class="section-card" data-frequent-selector>
-        <div class="section-title">频繁模式卡口选择（多选）</div>
+        <div class="section-title section-title-inline">
+          <span>频繁模式卡口选择</span>
+          <span class="selection-tag multi">多选</span>
+        </div>
         <div class="section-hint">可一次选择多个卡口，系统将统计每辆车在这些卡口中的出现次数。</div>
         {% if checkpoint_library %}
           <div class="search-stack">
@@ -229,7 +312,10 @@
         </section>
 
         <section class="section-card">
-          <div class="section-title">导出列选择（原文件）</div>
+          <div class="section-title section-title-inline">
+            <span>导出列选择（原文件）</span>
+            <span class="selection-tag multi">多选</span>
+          </div>
           <div class="section-hint">导出会保留下列勾选项，并额外附加“出现次数”等聚合字段。表格展示也会同步这些合并列。</div>
           {% if source_columns %}
             <div class="checklist-panel checklist-panel-large">

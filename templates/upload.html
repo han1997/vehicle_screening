@@ -34,8 +34,15 @@
 
     <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
       <label for="files">选择通行记录 Excel 文件（可多选）：</label>
-      <input type="file" name="files" id="files" accept=".xls,.xlsx" multiple required>
-      <small>建议表头包含：车牌号 / 抓拍时间 / 抓拍地点 / 号牌种类（如有）。</small>
+      <div class="file-picker">
+        <input type="file" name="files" id="files" accept=".xls,.xlsx" multiple required class="file-input-native">
+        <div class="file-picker-main">
+          <button type="button" class="file-trigger" data-file-trigger>选择 Excel 文件</button>
+          <div class="file-meta" data-file-meta>未选择文件，可点击左侧按钮或再次选择覆盖。</div>
+        </div>
+        <div class="file-list" data-file-list hidden></div>
+      </div>
+      <small>建议表头包含：车牌号 / 抓拍时间 / 抓拍地点 / 号牌种类（如有）。支持多文件同时上传。</small>
 
       <div class="empty-note" style="margin-top: 16px;">
         <strong>进入第二步后可做什么</strong>
@@ -67,4 +74,46 @@
       <small>卡口库已保存在本机，后续重新打开工具也可继续使用。</small>
     </section>
   {% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+  <script>
+    (function () {
+      const input = document.getElementById("files");
+      const trigger = document.querySelector("[data-file-trigger]");
+      const meta = document.querySelector("[data-file-meta]");
+      const list = document.querySelector("[data-file-list]");
+
+      if (!input || !trigger || !meta || !list) {
+        return;
+      }
+
+      function renderFiles() {
+        const files = Array.from(input.files || []);
+        if (!files.length) {
+          meta.textContent = "未选择文件，可点击左侧按钮或再次选择覆盖。";
+          list.replaceChildren();
+          list.hidden = true;
+          return;
+        }
+
+        meta.textContent = "已选择 " + files.length + " 个文件，将在提交后统一解析。";
+        list.hidden = false;
+        list.replaceChildren();
+        files.forEach((file) => {
+          const chip = document.createElement("span");
+          chip.className = "file-chip";
+          chip.textContent = file.name;
+          list.appendChild(chip);
+        });
+      }
+
+      trigger.addEventListener("click", function () {
+        input.click();
+      });
+
+      input.addEventListener("change", renderFiles);
+      renderFiles();
+    })();
+  </script>
 {% endblock %}

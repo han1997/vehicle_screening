@@ -35,7 +35,7 @@
 
       {% if selected_export_columns %}
         <section class="section-card" style="margin-bottom: 12px;">
-          <div class="section-title">合并展示列（导出同样生效）</div>
+          <div class="section-title">明细输出列（导出同样生效）</div>
           <div class="pill-cloud">
             {% for column in selected_export_columns %}
               <span class="pill">{{ column }}</span>
@@ -52,7 +52,7 @@
           <span class="legend-dot blue"></span><span>达标：刚好达到阈值</span>
         </div>
         <div class="toolbar-note">
-          导出结果会附加出现次数、覆盖时长、卡口分布，并包含你在上一步选择的原始列合并值。
+          车辆级字段会按同车记录做跨行合并展示，每条抓拍明细保持独立显示。
         </div>
       </div>
 
@@ -69,24 +69,32 @@
               <th>涉及卡口数</th>
               <th>卡口分布</th>
               <th>频次级别</th>
+              <th>本条抓拍时间</th>
+              <th>本条抓拍地点</th>
+              <th>本条号牌种类</th>
               {% for column in selected_export_columns %}
-                <th>{{ column }}（合并）</th>
+                <th>{{ column }}</th>
               {% endfor %}
             </tr>
           </thead>
           <tbody>
             {% for row in results %}
             <tr class="score-{{ row.level }}">
-              <td>{{ row.plate }}</td>
-              <td>{{ row.plate_type }}</td>
-              <td>{{ row.occurrence_count }}</td>
-              <td>{{ row.first_time }}</td>
-              <td>{{ row.last_time }}</td>
-              <td>{{ "%.2f"|format(row.duration_minutes) }}</td>
-              <td>{{ row.checkpoint_count }}</td>
-              <td>{{ row.checkpoint_summary }}</td>
-              <td><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
-              {% for item in row.merged_columns %}
+              {% if row.group_first %}
+                <td rowspan="{{ row.group_size }}">{{ row.plate }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.plate_type }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.occurrence_count }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.first_time }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.last_time }}</td>
+                <td rowspan="{{ row.group_size }}">{{ "%.2f"|format(row.duration_minutes) }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_count }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_summary }}</td>
+                <td rowspan="{{ row.group_size }}"><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
+              {% endif %}
+              <td>{{ row.event_time }}</td>
+              <td>{{ row.event_location }}</td>
+              <td>{{ row.event_plate_type }}</td>
+              {% for item in row.detail_columns %}
                 <td>{{ item.value }}</td>
               {% endfor %}
             </tr>

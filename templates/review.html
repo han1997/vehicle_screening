@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}配置第一/第二卡口与筛选条件 - 车辆进出筛选工具{% endblock %}
+{% block title %}配置筛选条件 - 车辆进出筛选工具{% endblock %}
 
 {% block content %}
-  <div class="step-badge">步骤 2 / 3 · 配置卡口</div>
-  <h2>搜索并选择第一卡口、第二卡口</h2>
-  <p class="subtext">上传后可先用小按钮按列导入卡口库。当前页面负责从本地卡口库中搜索并勾选第一卡口与第二卡口，再设置筛选时间段和目标过车间隔。</p>
+  <div class="step-badge">步骤 2 / 3 · 配置筛选</div>
+  <h2>选择筛选模式并设置参数</h2>
+  <p class="subtext">支持两种模式：配对模式按日期时间范围筛选，频繁模式按日内时段（24 小时制）筛选，可设置跨天时段如 20:00-04:00。</p>
 
   <div class="summary-grid">
     <div class="summary-card">
@@ -24,15 +24,21 @@
       <div class="summary-note">本地卡口库与当前数据重合的卡口数</div>
     </div>
     <div class="summary-card">
-      <div class="summary-label">已选卡口</div>
-      <div class="summary-value">{{ 1 if selected_first_checkpoint else 0 }} / {{ 1 if selected_second_checkpoint else 0 }}</div>
-      <div class="summary-note">第一卡口单选 / 第二卡口单选</div>
+      <div class="summary-label">当前模式</div>
+      <div class="summary-value">{{ "配对" if filter_mode == "pair" else "频繁" }}</div>
+      <div class="summary-note">
+        {% if filter_mode == "pair" %}
+          第一/第二卡口配对分析
+        {% else %}
+          多卡口出现次数分析（已选 {{ selected_frequent_checkpoints|length }} 个）
+        {% endif %}
+      </div>
     </div>
   </div>
 
   <section class="section-card">
     <div class="section-title">卡口库导入</div>
-    <div class="section-hint">按需从本次上传通行记录中选择一列导入本地卡口库，导入后可立即参与下方卡口搜索与筛选。</div>
+    <div class="section-hint">按需从本次上传通行记录中选择一列导入本地卡口库，导入后可立即参与下方筛选。</div>
     {% if source_columns %}
       <form action="{{ url_for('import_checkpoint_from_uploaded', data_id=data_id) }}" method="post" class="helper-inline">
         <label for="checkpoint_source_column" style="margin-bottom: 0;">导入列：</label>
@@ -54,7 +60,7 @@
   {% if plate_types %}
   <section class="section-card">
     <div class="section-title">号牌种类排除</div>
-    <div class="section-hint">勾选后，对应号牌种类不会参与配对计算。</div>
+    <div class="section-hint">勾选后，对应号牌种类不会参与筛选计算。</div>
     <div class="checklist-panel">
       <div class="checklist-grid">
         {% for pt in plate_types %}
@@ -69,70 +75,31 @@
   {% endif %}
 
   <form action="{{ url_for('filter_results', data_id=data_id) }}" method="post" id="filter-form">
-    <div class="section-grid">
-      <section class="section-card" data-checkpoint-selector="first">
-        <div class="section-title">第一卡口</div>
-        <div class="section-hint">输入关键词可实时过滤卡口列表，并即时更新匹配数量。第一卡口只能选择一个，当前数据中命中的卡口会优先排在列表前面。</div>
-        {% if checkpoint_library %}
-          <div class="search-stack">
-            <input type="search" placeholder="搜索第一卡口，如：东门、收费站、抓拍点" data-search-input>
-            <div class="search-meta">
-              <span data-search-status>正在加载匹配结果...</span>
-              <span>单选后作为第一卡口参与配对</span>
-            </div>
-          </div>
-          <div class="checklist-panel checklist-panel-large">
-            <div class="checklist-grid">
-              {% for checkpoint in prioritized_checkpoint_library %}
-              <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
-                <input type="radio" name="first_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_first_checkpoint %}checked{% endif %}>
-                <span>{{ checkpoint }}</span>
-              </label>
-              {% endfor %}
-            </div>
-          </div>
-        {% else %}
-          <div class="empty-note">
-            <strong>暂无可选第一卡口</strong>
-            <p>请先使用上方小按钮导入卡口库。</p>
-          </div>
-        {% endif %}
-      </section>
+    <section class="section-card">
+      <div class="section-title">筛选模式</div>
+      <div class="section-hint">可随时切换。系统会记住你上次在两种模式下填写的参数。</div>
+      <div class="choice-row">
+        <label class="choice-card">
+          <input type="radio" name="filter_mode" value="pair" {% if filter_mode != "frequent" %}checked{% endif %}>
+          <span>
+            <strong>卡口配对模式</strong>
+            <span>选择第一卡口和第二卡口，筛选符合时间顺序的车辆配对记录。</span>
+          </span>
+        </label>
+        <label class="choice-card">
+          <input type="radio" name="filter_mode" value="frequent" {% if filter_mode == "frequent" %}checked{% endif %}>
+          <span>
+            <strong>频繁出现模式</strong>
+            <span>一次可选多个卡口，按出现次数阈值筛出指定时间段内频繁出现车辆。</span>
+          </span>
+        </label>
+      </div>
+    </section>
 
-      <section class="section-card" data-checkpoint-selector="second">
-        <div class="section-title">第二卡口</div>
-        <div class="section-hint">搜索结果会实时更新，便于快速定位第二卡口。第二卡口只能选择一个，且不能与第一卡口相同。</div>
-        {% if checkpoint_library %}
-          <div class="search-stack">
-            <input type="search" placeholder="搜索第二卡口，如：西门、外环、离场点" data-search-input>
-            <div class="search-meta">
-              <span data-search-status>正在加载匹配结果...</span>
-              <span>单选后作为第二卡口参与配对</span>
-            </div>
-          </div>
-          <div class="checklist-panel checklist-panel-large">
-            <div class="checklist-grid">
-              {% for checkpoint in prioritized_checkpoint_library %}
-              <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
-                <input type="radio" name="second_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_second_checkpoint %}checked{% endif %}>
-                <span>{{ checkpoint }}</span>
-              </label>
-              {% endfor %}
-            </div>
-          </div>
-        {% else %}
-          <div class="empty-note">
-            <strong>暂无可选第二卡口</strong>
-            <p>请先使用上方小按钮导入卡口库。</p>
-          </div>
-        {% endif %}
-      </section>
-    </div>
-
-    <div class="section-grid">
+    <div data-mode-block="pair">
       <section class="section-card">
-        <div class="section-title">筛选时间段</div>
-        <div class="section-hint">默认已回填当前通行数据最小时间到最大时间，只统计该时间段内的卡口记录。</div>
+        <div class="section-title">筛选时间段（配对模式）</div>
+        <div class="section-hint">默认回填当前通行数据最小时间到最大时间，只统计该时间段内记录。</div>
         <div class="helper-inline">
           <span>从</span>
           <input type="datetime-local" name="start_time" value="{{ start_time_value }}">
@@ -141,14 +108,149 @@
         </div>
       </section>
 
+      <div class="section-grid">
+        <section class="section-card" data-checkpoint-selector="first">
+          <div class="section-title">第一卡口</div>
+          <div class="section-hint">输入关键词可实时过滤卡口列表。第一卡口只能选择一个。</div>
+          {% if checkpoint_library %}
+            <div class="search-stack">
+              <input type="search" placeholder="搜索第一卡口，如：东门、收费站、抓拍点" data-search-input>
+              <div class="search-meta">
+                <span data-search-status>正在加载匹配结果...</span>
+                <span>单选后作为第一卡口参与配对</span>
+              </div>
+            </div>
+            <div class="checklist-panel checklist-panel-large">
+              <div class="checklist-grid">
+                {% for checkpoint in prioritized_checkpoint_library %}
+                <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                  <input type="radio" name="first_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_first_checkpoint %}checked{% endif %}>
+                  <span>{{ checkpoint }}</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <div class="empty-note">
+              <strong>暂无可选第一卡口</strong>
+              <p>请先使用上方小按钮导入卡口库。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="section-card" data-checkpoint-selector="second">
+          <div class="section-title">第二卡口</div>
+          <div class="section-hint">搜索结果会实时更新。第二卡口只能选择一个，且不能与第一卡口相同。</div>
+          {% if checkpoint_library %}
+            <div class="search-stack">
+              <input type="search" placeholder="搜索第二卡口，如：西门、外环、离场点" data-search-input>
+              <div class="search-meta">
+                <span data-search-status>正在加载匹配结果...</span>
+                <span>单选后作为第二卡口参与配对</span>
+              </div>
+            </div>
+            <div class="checklist-panel checklist-panel-large">
+              <div class="checklist-grid">
+                {% for checkpoint in prioritized_checkpoint_library %}
+                <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                  <input type="radio" name="second_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_second_checkpoint %}checked{% endif %}>
+                  <span>{{ checkpoint }}</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <div class="empty-note">
+              <strong>暂无可选第二卡口</strong>
+              <p>请先使用上方小按钮导入卡口库。</p>
+            </div>
+          {% endif %}
+        </section>
+      </div>
+
       <section class="section-card">
         <div class="section-title">目标过车间隔</div>
-        <div class="section-hint">越接近此间隔的卡口记录配对，评分越高。高风险结果会在结果页和导出文件中显示警戒色。</div>
+        <div class="section-hint">越接近此间隔的配对记录评分越高，高风险结果会在结果页和导出文件中显示警戒色。</div>
         <label for="target_minutes">目标过车间隔（分钟）：</label>
         <input type="number" name="target_minutes" id="target_minutes"
-               value="{{ config.target_minutes|default(default_max_minutes or 30) }}" min="1" step="1">
+               value="{{ target_minutes_value }}" min="1" step="1">
         <small>当前数据命中的本地卡口：{{ matched_checkpoints|join('、') if matched_checkpoints else '暂无' }}</small>
       </section>
+    </div>
+
+    <div data-mode-block="frequent">
+      <section class="section-card">
+        <div class="section-title">日内时段（频繁模式）</div>
+        <div class="section-hint">按 24 小时制设置时段，仅比较每天的时分；支持跨天，例如 20:00 到 04:00。</div>
+        <div class="helper-inline">
+          <span>从</span>
+          <input type="time" name="frequent_start_clock" value="{{ frequent_start_clock_value }}" step="60">
+          <span>到</span>
+          <input type="time" name="frequent_end_clock" value="{{ frequent_end_clock_value }}" step="60">
+        </div>
+      </section>
+
+      <section class="section-card" data-frequent-selector>
+        <div class="section-title">频繁模式卡口选择（多选）</div>
+        <div class="section-hint">可一次选择多个卡口，系统将统计每辆车在这些卡口中的出现次数。</div>
+        {% if checkpoint_library %}
+          <div class="search-stack">
+            <input type="search" placeholder="搜索卡口，如：东门、收费站、主路段" data-frequent-search>
+            <div class="search-meta">
+              <span data-frequent-status>正在加载匹配结果...</span>
+              <span>可多选，当前已勾选 {{ selected_frequent_checkpoints|length }} 个</span>
+            </div>
+          </div>
+          <div class="checklist-panel checklist-panel-large">
+            <div class="checklist-grid">
+              {% for checkpoint in prioritized_checkpoint_library %}
+              <label class="check-item" data-frequent-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                <input type="checkbox" name="frequent_checkpoints" value="{{ checkpoint }}" {% if checkpoint in selected_frequent_checkpoints %}checked{% endif %}>
+                <span>{{ checkpoint }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+        {% else %}
+          <div class="empty-note">
+            <strong>暂无可选卡口</strong>
+            <p>请先使用上方小按钮导入卡口库。</p>
+          </div>
+        {% endif %}
+      </section>
+
+      <div class="section-grid">
+        <section class="section-card">
+          <div class="section-title">出现次数阈值</div>
+          <div class="section-hint">默认值 2，表示同一车辆在所选卡口中的出现次数达到该阈值才会被筛出。</div>
+          <label for="min_occurrence">最小出现次数：</label>
+          <input type="number" name="min_occurrence" id="min_occurrence"
+                 value="{{ min_occurrence_value }}" min="1" step="1">
+        </section>
+
+        <section class="section-card">
+          <div class="section-title">导出列选择（原文件）</div>
+          <div class="section-hint">导出会保留下列勾选项，并额外附加“出现次数”等聚合字段。表格展示也会同步这些合并列。</div>
+          {% if source_columns %}
+            <div class="checklist-panel checklist-panel-large">
+              <div class="checklist-grid">
+                {% for column in source_columns %}
+                <label class="check-item">
+                  <input type="checkbox" name="export_columns" value="{{ column }}" {% if column in selected_export_columns %}checked{% endif %}>
+                  <span>{{ column }}</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+            <small data-export-column-status>已选择 {{ selected_export_columns|length }} 列。</small>
+          {% else %}
+            <div class="empty-note">
+              <strong>当前没有可选导出列</strong>
+              <p>请返回首页重新上传带表头的 Excel 文件。</p>
+            </div>
+          {% endif %}
+        </section>
+      </div>
     </div>
 
     <div class="action-strip">
@@ -156,8 +258,11 @@
         <button type="submit" {% if not checkpoint_library %}disabled{% endif %}>开始筛选</button>
         <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">返回首页</a>
       </div>
-      <div class="toolbar-note">
-        搜索过滤仅影响显示，不会改动卡口库本身。提交时系统会校验第一卡口和第二卡口必须各选一个且不能相同。
+      <div class="toolbar-note" data-mode-note="pair">
+        配对模式提交时会校验第一卡口和第二卡口必须各选一个且不能相同。
+      </div>
+      <div class="toolbar-note" data-mode-note="frequent">
+        频繁模式按日内时段筛选（支持跨天，如 20:00-04:00），并对同一车辆做聚合展示。
       </div>
     </div>
   </form>
@@ -204,7 +309,110 @@
         renderMatches();
       }
 
+      function initFrequentSelector(section) {
+        const input = section.querySelector("[data-frequent-search]");
+        const status = section.querySelector("[data-frequent-status]");
+        const items = Array.from(section.querySelectorAll("[data-frequent-item]"));
+        const checkboxes = items
+          .map((item) => item.querySelector('input[type="checkbox"]'))
+          .filter(Boolean);
+        const totalCurrent = items.filter((item) => item.dataset.current === "1").length;
+
+        if (!input || !status || !items.length) {
+          return;
+        }
+
+        function renderMatches() {
+          const query = input.value.trim().toLowerCase();
+          let matchedCount = 0;
+          let currentMatchedCount = 0;
+          let selectedCount = 0;
+
+          items.forEach((item) => {
+            const text = item.dataset.search || "";
+            const matched = !query || text.includes(query);
+            item.classList.toggle("check-item-hidden", !matched);
+            if (matched) {
+              matchedCount += 1;
+              if (item.dataset.current === "1") {
+                currentMatchedCount += 1;
+              }
+            }
+          });
+
+          checkboxes.forEach((checkbox) => {
+            if (checkbox.checked) {
+              selectedCount += 1;
+            }
+          });
+
+          if (query) {
+            status.textContent = "实时匹配 " + matchedCount + " 个卡口（命中当前数据 " + currentMatchedCount + " 个），已勾选 " + selectedCount + " 个";
+          } else {
+            status.textContent = "显示全部 " + items.length + " 个卡口（命中当前数据 " + totalCurrent + " 个），已勾选 " + selectedCount + " 个";
+          }
+        }
+
+        input.addEventListener("input", renderMatches);
+        checkboxes.forEach((checkbox) => checkbox.addEventListener("change", renderMatches));
+        renderMatches();
+      }
+
+      function initExportColumnStatus(form) {
+        const status = form.querySelector("[data-export-column-status]");
+        const inputs = Array.from(form.querySelectorAll('input[name="export_columns"]'));
+
+        if (!status || !inputs.length) {
+          return;
+        }
+
+        function renderStatus() {
+          const selectedCount = inputs.filter((input) => input.checked).length;
+          if (selectedCount > 0) {
+            status.textContent = "已选择 " + selectedCount + " 列，导出将附加出现次数等聚合字段。";
+          } else {
+            status.textContent = "未勾选时将自动使用默认列。";
+          }
+        }
+
+        inputs.forEach((input) => input.addEventListener("change", renderStatus));
+        renderStatus();
+      }
+
+      function initModeSwitch(form) {
+        const modeInputs = Array.from(form.querySelectorAll('input[name="filter_mode"]'));
+        const modeBlocks = Array.from(form.querySelectorAll("[data-mode-block]"));
+        const modeNotes = Array.from(form.querySelectorAll("[data-mode-note]"));
+
+        if (!modeInputs.length) {
+          return;
+        }
+
+        function syncMode() {
+          const active = modeInputs.find((input) => input.checked);
+          const mode = active ? active.value : "pair";
+
+          modeBlocks.forEach((block) => {
+            block.style.display = block.dataset.modeBlock === mode ? "" : "none";
+          });
+
+          modeNotes.forEach((note) => {
+            note.style.display = note.dataset.modeNote === mode ? "" : "none";
+          });
+        }
+
+        modeInputs.forEach((input) => input.addEventListener("change", syncMode));
+        syncMode();
+      }
+
       document.querySelectorAll("[data-checkpoint-selector]").forEach(initCheckpointSelector);
+      document.querySelectorAll("[data-frequent-selector]").forEach(initFrequentSelector);
+
+      const filterForm = document.getElementById("filter-form");
+      if (filterForm) {
+        initModeSwitch(filterForm);
+        initExportColumnStatus(filterForm);
+      }
     })();
   </script>
 {% endblock %}

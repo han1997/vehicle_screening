@@ -18,6 +18,12 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"xls", "xlsx"}
 CHECKPOINT_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "checkpoint_library.json")
+FILTER_MODE_PAIR = "pair"
+FILTER_MODE_FREQUENT = "frequent"
+DEFAULT_FREQUENT_OCCURRENCE = 2
+DEFAULT_FREQUENT_START_CLOCK = "00:00"
+DEFAULT_FREQUENT_END_CLOCK = "23:59"
+SOURCE_COLUMN_PREFIX = "__source__"
 
 # 简单的内存数据存储，适合本地单用户使用
 DATA_STORE = {}
@@ -38,13 +44,162 @@ def normalize_text_list(values):
     """标准化文本列表，去除空值并去重排序。"""
     normalized = set()
     for value in values:
-        if value is None or pd.isna(value):
-            continue
-        text = str(value).strip()
-        if not text or text.lower() == "nan":
+        text = normalize_text_value(value)
+        if not text:
             continue
         normalized.add(text)
     return sorted(normalized)
+
+
+def normalize_text_value(value):
+    """将任意值标准化为可比较文本。"""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in {"nan", "none", "nat"}:
+        return ""
+    return text
+
+
+def normalize_choice_list(values, allowed_values=None):
+    """按原顺序去重并过滤空值，可选限制在 allowed_values 内。"""
+    normalized = []
+    seen = set()
+    allowed = set(allowed_values) if allowed_values is not None else None
+
+    for value in values or []:
+        text = normalize_text_value(value)
+        if not text or text in seen:
+            continue
+        if allowed is not None and text not in allowed:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def normalize_excel_headers(columns):
+    """标准化 Excel 表头，空列名补全并保证唯一。"""
+    normalized = []
+    seen = {}
+
+    for idx, column in enumerate(columns, start=1):
+        base = normalize_text_value(column)
+        if not base:
+            base = f"未命名列{idx}"
+
+        suffix = seen.get(base, 0)
+        if suffix > 0:
+            name = f"{base}_{suffix + 1}"
+        else:
+            name = base
+
+        seen[base] = suffix + 1
+        normalized.append(name)
+
+    return normalized
+
+
+def source_column_key(column_name):
+    """将原始列名映射到内部列名。"""
+    return f"{SOURCE_COLUMN_PREFIX}{column_name}"
+
+
+def pick_default_export_columns(source_columns):
+    """频繁出现模式默认导出列。"""
+    priorities = [
+        "车牌号",
+        "车牌号码",
+        "号牌号码",
+        "抓拍时间",
+        "通过时间",
+        "通行时间",
+        "抓拍地点",
+        "地点",
+        "号牌种类",
+        "号牌类型",
+    ]
+    selected = [column for column in priorities if column in source_columns]
+    if len(selected) >= 6:
+        return selected[:6]
+
+    for column in source_columns:
+        if column not in selected:
+            selected.append(column)
+        if len(selected) >= 6:
+            break
+
+    return selected
+
+
+def parse_time_window(start_time_str, end_time_str):
+    """解析前端传入的时间区间。"""
+    if not start_time_str or not end_time_str:
+        raise ValueError("请输入完整的筛选时间段。")
+
+    try:
+        start_time = datetime.fromisoformat(start_time_str)
+        end_time = datetime.fromisoformat(end_time_str)
+    except ValueError:
+        raise ValueError("时间段格式不正确，请重新选择。")
+
+    # datetime-local 通常精度到分钟，这里将结束时间扩展到该分钟末尾，避免秒级数据被误排除。
+    if end_time.second == 0 and end_time.microsecond == 0:
+        end_time = end_time + timedelta(minutes=1) - timedelta(microseconds=1)
+
+    if start_time > end_time:
+        raise ValueError("请确保开始时间早于或等于结束时间。")
+
+    return start_time, end_time
+
+
+def parse_clock_window(start_clock_str, end_clock_str):
+    """解析日内时段（HH:MM-HH:MM），支持跨天。"""
+    if not start_clock_str or not end_clock_str:
+        raise ValueError("频繁出现模式请填写完整的日内时段。")
+
+    try:
+        start_clock = datetime.strptime(start_clock_str, "%H:%M").time()
+        end_clock = datetime.strptime(end_clock_str, "%H:%M").time()
+    except ValueError:
+        raise ValueError("日内时段格式不正确，请按 24 小时制填写，例如 20:00-04:00。")
+
+    return start_clock, end_clock
+
+
+def clock_to_minutes(clock_value):
+    """将时分秒转为分钟（向下取整到分钟）。"""
+    return clock_value.hour * 60 + clock_value.minute
+
+
+def merge_distinct_values(values, limit=8):
+    """将一组值去重后合并展示。"""
+    merged = []
+    seen = set()
+
+    for value in values:
+        text = normalize_text_value(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+
+    if not merged:
+        return ""
+
+    if len(merged) <= limit:
+        return " | ".join(merged)
+
+    return " | ".join(merged[:limit]) + f" | ... 共 {len(merged)} 项"
+
+
+def format_datetime_string(value):
+    """格式化时间用于展示和导出。"""
+    if value is None or pd.isna(value):
+        return ""
+    return pd.Timestamp(value).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def load_checkpoint_library():
@@ -126,6 +281,287 @@ def build_results_summary(df):
     return summary
 
 
+def build_frequent_results_summary(df, matched_records, threshold):
+    """统计频繁出现模式的结果概览。"""
+    summary = {
+        "total_vehicles": 0,
+        "matched_records": int(matched_records),
+        "threshold": int(threshold),
+        "max_occurrence": 0,
+        "avg_occurrence": 0.0,
+        "total_occurrences": 0,
+        "multi_checkpoint_vehicles": 0,
+    }
+
+    if df is None or df.empty:
+        return summary
+
+    summary["total_vehicles"] = int(len(df))
+
+    if "occurrence_count" in df.columns:
+        occurrence_series = pd.to_numeric(df["occurrence_count"], errors="coerce").dropna()
+    else:
+        occurrence_series = pd.Series(dtype=float)
+
+    if "checkpoint_count" in df.columns:
+        checkpoint_series = pd.to_numeric(df["checkpoint_count"], errors="coerce").dropna()
+    else:
+        checkpoint_series = pd.Series(dtype=float)
+
+    if not occurrence_series.empty:
+        summary["max_occurrence"] = int(occurrence_series.max())
+        summary["avg_occurrence"] = round(float(occurrence_series.mean()), 2)
+        summary["total_occurrences"] = int(occurrence_series.sum())
+
+    if not checkpoint_series.empty:
+        summary["multi_checkpoint_vehicles"] = int((checkpoint_series >= 2).sum())
+
+    return summary
+
+
+def build_pair_filtered_dataframe(
+    df,
+    start_time,
+    end_time,
+    active_first_locations,
+    active_second_locations,
+    target_minutes,
+):
+    """第一/第二卡口配对模式计算。"""
+    valid_locations = active_first_locations.union(active_second_locations)
+    df_valid = df[df["location"].isin(valid_locations)].copy()
+    df_valid = df_valid[(df_valid["time"] >= start_time) & (df_valid["time"] <= end_time)]
+    df_valid = df_valid.sort_values("time")
+
+    results = []
+
+    for plate, group in df_valid.groupby("plate"):
+        first_events = group[group["location"].isin(active_first_locations)]
+        second_events = group[group["location"].isin(active_second_locations)]
+
+        if first_events.empty or second_events.empty:
+            continue
+
+        second_list = list(second_events.itertuples(index=False))
+
+        for first_row in first_events.itertuples(index=False):
+            first_time = first_row.time
+            best_second = None
+            best_delta = None
+
+            for second_row in second_list:
+                second_time = second_row.time
+                if second_time <= first_time:
+                    continue
+                delta = second_time - first_time
+                best_second = second_row
+                best_delta = delta
+                break
+
+            if best_second and best_delta is not None:
+                delta_minutes = best_delta.total_seconds() / 60.0
+                diff = abs(delta_minutes - target_minutes)
+                normalized = diff / target_minutes
+                raw_score = max(0.0, 1.0 - normalized)
+                score = int(round(raw_score * 100))
+
+                if score >= 70:
+                    level = "red"
+                elif score >= 40:
+                    level = "yellow"
+                else:
+                    level = "blue"
+
+                results.append(
+                    {
+                        "plate": plate,
+                        "plate_type": getattr(first_row, "plate_type", ""),
+                        "first_time": first_row.time,
+                        "first_location": first_row.location,
+                        "second_time": best_second.time,
+                        "second_location": best_second.location,
+                        "delta_minutes": delta_minutes,
+                        "score": score,
+                        "level": level,
+                    }
+                )
+
+    if results:
+        filtered_df = pd.DataFrame(results)
+        return filtered_df.sort_values("score", ascending=False)
+
+    return pd.DataFrame(
+        columns=[
+            "plate",
+            "plate_type",
+            "first_time",
+            "first_location",
+            "second_time",
+            "second_location",
+            "delta_minutes",
+            "score",
+            "level",
+        ]
+    )
+
+
+def build_frequent_filtered_dataframe(
+    df,
+    start_clock,
+    end_clock,
+    active_checkpoints,
+    min_occurrence,
+    selected_export_columns,
+):
+    """多卡口频繁出现模式计算。"""
+    df_valid = df[df["location"].isin(set(active_checkpoints))].copy()
+    start_minutes = clock_to_minutes(start_clock)
+    end_minutes = clock_to_minutes(end_clock)
+
+    clock_minutes = df_valid["time"].dt.hour * 60 + df_valid["time"].dt.minute
+    if start_minutes <= end_minutes:
+        time_mask = (clock_minutes >= start_minutes) & (clock_minutes <= end_minutes)
+    else:
+        # 例如 20:00-04:00，表示跨天时段
+        time_mask = (clock_minutes >= start_minutes) | (clock_minutes <= end_minutes)
+
+    df_valid = df_valid[time_mask]
+    df_valid = df_valid.sort_values("time")
+    matched_records = int(len(df_valid))
+
+    results = []
+
+    for plate, group in df_valid.groupby("plate"):
+        occurrence_count = int(len(group))
+        if occurrence_count < min_occurrence:
+            continue
+
+        group_sorted = group.sort_values("time")
+        first_time = group_sorted["time"].iloc[0]
+        last_time = group_sorted["time"].iloc[-1]
+        duration_minutes = (last_time - first_time).total_seconds() / 60.0
+
+        checkpoint_counts = group_sorted["location"].value_counts()
+        checkpoint_summary = "、".join(
+            f"{location} × {int(count)}" for location, count in checkpoint_counts.items()
+        )
+
+        source_values = {}
+        for column in selected_export_columns:
+            key = source_column_key(column)
+            if key in group_sorted.columns:
+                source_values[column] = merge_distinct_values(group_sorted[key].tolist())
+            else:
+                source_values[column] = ""
+
+        results.append(
+            {
+                "plate": plate,
+                "plate_type": merge_distinct_values(group_sorted["plate_type"].tolist()),
+                "occurrence_count": occurrence_count,
+                "first_time": first_time,
+                "last_time": last_time,
+                "duration_minutes": round(duration_minutes, 2),
+                "checkpoint_count": int(checkpoint_counts.size),
+                "checkpoint_summary": checkpoint_summary,
+                "source_values": source_values,
+            }
+        )
+
+    if results:
+        filtered_df = pd.DataFrame(results)
+        filtered_df = filtered_df.sort_values(
+            ["occurrence_count", "checkpoint_count", "last_time"],
+            ascending=[False, False, False],
+        )
+    else:
+        filtered_df = pd.DataFrame(
+            columns=[
+                "plate",
+                "plate_type",
+                "occurrence_count",
+                "first_time",
+                "last_time",
+                "duration_minutes",
+                "checkpoint_count",
+                "checkpoint_summary",
+                "source_values",
+            ]
+        )
+
+    return filtered_df, matched_records
+
+
+def build_pair_display_results(filtered_df):
+    """构造第一/第二卡口模式的前端展示数据。"""
+    display_results = []
+    for row in filtered_df.itertuples(index=False):
+        level_val = str(row.level) if hasattr(row, "level") and pd.notnull(row.level) else ""
+        delta_raw = getattr(row, "delta_minutes", 0.0)
+        delta_value = float(delta_raw) if pd.notnull(delta_raw) else 0.0
+        score_raw = getattr(row, "score", 0)
+        score_value = int(score_raw) if pd.notnull(score_raw) else 0
+        display_results.append(
+            {
+                "plate": row.plate,
+                "plate_type": normalize_text_value(getattr(row, "plate_type", "")),
+                "first_time": format_datetime_string(getattr(row, "first_time", None)),
+                "first_location": normalize_text_value(getattr(row, "first_location", "")),
+                "second_time": format_datetime_string(getattr(row, "second_time", None)),
+                "second_location": normalize_text_value(getattr(row, "second_location", "")),
+                "delta_minutes": delta_value,
+                "score": score_value,
+                "level": level_val,
+                "level_label": get_risk_label(level_val),
+            }
+        )
+    return display_results
+
+
+def build_frequent_display_results(filtered_df, threshold, selected_export_columns):
+    """构造频繁出现模式的前端展示数据。"""
+    display_results = []
+
+    for row in filtered_df.to_dict(orient="records"):
+        occurrence_count = int(row.get("occurrence_count", 0) or 0)
+        if occurrence_count >= threshold + 3:
+            level = "red"
+            level_label = "高频"
+        elif occurrence_count >= threshold + 1:
+            level = "yellow"
+            level_label = "关注"
+        else:
+            level = "blue"
+            level_label = "达标"
+
+        source_values = row.get("source_values", {})
+        if not isinstance(source_values, dict):
+            source_values = {}
+
+        merged_columns = [
+            {"name": column, "value": normalize_text_value(source_values.get(column, ""))}
+            for column in selected_export_columns
+        ]
+
+        display_results.append(
+            {
+                "plate": normalize_text_value(row.get("plate", "")),
+                "plate_type": normalize_text_value(row.get("plate_type", "")),
+                "occurrence_count": occurrence_count,
+                "first_time": format_datetime_string(row.get("first_time")),
+                "last_time": format_datetime_string(row.get("last_time")),
+                "duration_minutes": float(row.get("duration_minutes", 0.0) or 0.0),
+                "checkpoint_count": int(row.get("checkpoint_count", 0) or 0),
+                "checkpoint_summary": normalize_text_value(row.get("checkpoint_summary", "")),
+                "level": level,
+                "level_label": level_label,
+                "merged_columns": merged_columns,
+            }
+        )
+
+    return display_results
+
+
 def build_export_dataframe(filtered_df):
     """构造导出使用的数据表，并保留每行风险级别。"""
     export_df = filtered_df.copy()
@@ -177,6 +613,49 @@ def build_export_dataframe(filtered_df):
         "风险等级",
     ]
     return export_df[columns], risk_levels
+
+
+def build_frequent_export_dataframe(filtered_df, selected_export_columns):
+    """构造频繁出现模式导出表。"""
+    base_columns = [
+        "车牌号",
+        "号牌种类",
+        "出现次数",
+        "首次出现时间",
+        "最后出现时间",
+        "覆盖时长（分钟）",
+        "涉及卡口数",
+        "卡口分布",
+    ]
+    all_columns = base_columns + selected_export_columns
+
+    if filtered_df is None or filtered_df.empty:
+        return pd.DataFrame(columns=all_columns)
+
+    export_rows = []
+    for row in filtered_df.to_dict(orient="records"):
+        source_values = row.get("source_values", {})
+        if not isinstance(source_values, dict):
+            source_values = {}
+
+        export_row = {
+            "车牌号": normalize_text_value(row.get("plate", "")),
+            "号牌种类": normalize_text_value(row.get("plate_type", "")),
+            "出现次数": int(row.get("occurrence_count", 0) or 0),
+            "首次出现时间": format_datetime_string(row.get("first_time")),
+            "最后出现时间": format_datetime_string(row.get("last_time")),
+            "覆盖时长（分钟）": round(float(row.get("duration_minutes", 0.0) or 0.0), 2),
+            "涉及卡口数": int(row.get("checkpoint_count", 0) or 0),
+            "卡口分布": normalize_text_value(row.get("checkpoint_summary", "")),
+        }
+
+        for column in selected_export_columns:
+            export_row[column] = normalize_text_value(source_values.get(column, ""))
+
+        export_rows.append(export_row)
+
+    export_df = pd.DataFrame(export_rows)
+    return export_df[all_columns]
 
 
 def excel_column_name(index):
@@ -386,12 +865,22 @@ def build_warning_workbook(export_df, risk_levels, summary):
     return output
 
 
+def build_plain_workbook(export_df, sheet_name):
+    """生成普通 xlsx 文件。"""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name=sheet_name)
+    output.seek(0)
+    return output
+
+
 def find_matching_column(df, candidates):
     """在 DataFrame 中根据候选列表找到匹配的列名。"""
-    normalized = {col: str(col).strip() for col in df.columns}
+    normalized = {col: normalize_text_value(col).lower() for col in df.columns}
     for cand in candidates:
+        cand_normalized = normalize_text_value(cand).lower()
         for original, norm in normalized.items():
-            if norm == cand:
+            if norm == cand_normalized:
                 return original
     return None
 
@@ -406,8 +895,8 @@ def parse_excel(path):
     if df.empty:
         raise ValueError("Excel 文件为空。")
 
-    source_columns = [str(column).strip() for column in df.columns]
-    source_columns = [column for column in source_columns if column]
+    df.columns = normalize_excel_headers(df.columns)
+    source_columns = df.columns.tolist()
 
     plate_candidates = [
         "车牌号",
@@ -462,26 +951,33 @@ def parse_excel(path):
         cols_str = ", ".join(str(c) for c in df.columns)
         raise ValueError(f"无法自动识别列: {', '.join(missing)}。当前表头为: {cols_str}")
 
-    # 保留需要的列并统一列名
+    parsed_df = pd.DataFrame(
+        {
+            "plate": df[plate_col],
+            "time": pd.to_datetime(df[time_col], errors="coerce"),
+            "location": df[location_col],
+        }
+    )
+
     if plate_type_col is not None:
-        df = df[[plate_col, time_col, location_col, plate_type_col]].copy()
-        df.columns = ["plate", "time", "location", "plate_type"]
+        parsed_df["plate_type"] = df[plate_type_col]
     else:
-        df = df[[plate_col, time_col, location_col]].copy()
-        df.columns = ["plate", "time", "location"]
+        parsed_df["plate_type"] = ""
 
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
-    df["plate"] = df["plate"].astype(str).str.strip()
-    df["location"] = df["location"].astype(str).str.strip()
-    if "plate_type" in df.columns:
-        df["plate_type"] = df["plate_type"].astype(str).str.strip()
+    for column in source_columns:
+        parsed_df[source_column_key(column)] = df[column]
 
-    df = df.dropna(subset=["plate", "time", "location"])
-    df = df[df["plate"] != ""]
-    df = df[df["plate"] != "无牌车"]
-    df = df[df["plate"] != "未识别"]
+    parsed_df["plate"] = parsed_df["plate"].map(normalize_text_value)
+    parsed_df["location"] = parsed_df["location"].map(normalize_text_value)
+    parsed_df["plate_type"] = parsed_df["plate_type"].map(normalize_text_value)
 
-    return df, source_columns
+    parsed_df = parsed_df.dropna(subset=["time"])
+    parsed_df = parsed_df[parsed_df["plate"] != ""]
+    parsed_df = parsed_df[parsed_df["location"] != ""]
+    parsed_df = parsed_df[parsed_df["plate"] != "无牌车"]
+    parsed_df = parsed_df[parsed_df["plate"] != "未识别"]
+
+    return parsed_df, source_columns
 
 
 def import_checkpoints_from_uploaded_files(filepaths, column_name):
@@ -499,10 +995,12 @@ def import_checkpoints_from_uploaded_files(filepaths, column_name):
         except Exception as exc:
             raise ValueError(f"读取已上传文件失败: {exc}")
 
-        normalized_map = {str(column).strip(): column for column in header_df.columns}
-        actual_column = normalized_map.get(selected_column)
-        if actual_column is None:
+        normalized_headers = normalize_excel_headers(header_df.columns)
+        try:
+            selected_index = normalized_headers.index(selected_column)
+        except ValueError:
             continue
+        actual_column = header_df.columns[selected_index]
 
         try:
             value_df = pd.read_excel(path, dtype=str, usecols=[actual_column])
@@ -578,15 +1076,15 @@ def upload():
 
     df = pd.concat(dfs, ignore_index=True)
     locations = sorted(df["location"].dropna().unique().tolist())
-    if "plate_type" in df.columns:
-        plate_types = sorted(df["plate_type"].dropna().unique().tolist())
-    else:
-        plate_types = []
+    plate_type_series = df.get("plate_type", pd.Series(dtype=object))
+    plate_type_values = [normalize_text_value(value) for value in plate_type_series.tolist()]
+    plate_types = sorted({value for value in plate_type_values if value})
 
     data_id = str(uuid.uuid4())
     default_max_minutes = 30.0  # 初始默认值，在下一步页面可修改
     default_start_time = format_datetime_local(df["time"].min())
     default_end_time = format_datetime_local(df["time"].max())
+    default_export_columns = pick_default_export_columns(source_columns)
 
     DATA_STORE[data_id] = {
         "df": df,
@@ -599,6 +1097,16 @@ def upload():
         "default_max_minutes": default_max_minutes,
         "default_start_time": default_start_time,
         "default_end_time": default_end_time,
+        "config": {
+            "filter_mode": FILTER_MODE_PAIR,
+            "min_occurrence": DEFAULT_FREQUENT_OCCURRENCE,
+            "frequent_start_clock": DEFAULT_FREQUENT_START_CLOCK,
+            "frequent_end_clock": DEFAULT_FREQUENT_END_CLOCK,
+            "export_columns": default_export_columns,
+            "start_time": default_start_time,
+            "end_time": default_end_time,
+            "target_minutes": default_max_minutes,
+        },
     }
 
     return redirect(url_for("review", data_id=data_id))
@@ -650,8 +1158,22 @@ def review(data_id):
         return redirect(url_for("upload_form"))
 
     config = data.get("config", {})
-    start_time_value = config.get("start_time") or data.get("default_start_time", "")
-    end_time_value = config.get("end_time") or data.get("default_end_time", "")
+    filter_mode = normalize_text_value(config.get("filter_mode", FILTER_MODE_PAIR)).lower()
+    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT}:
+        filter_mode = FILTER_MODE_PAIR
+
+    start_time_value = normalize_text_value(config.get("start_time")) or data.get(
+        "default_start_time", ""
+    )
+    end_time_value = normalize_text_value(config.get("end_time")) or data.get(
+        "default_end_time", ""
+    )
+    frequent_start_clock_value = normalize_text_value(
+        config.get("frequent_start_clock", DEFAULT_FREQUENT_START_CLOCK)
+    ) or DEFAULT_FREQUENT_START_CLOCK
+    frequent_end_clock_value = normalize_text_value(
+        config.get("frequent_end_clock", DEFAULT_FREQUENT_END_CLOCK)
+    ) or DEFAULT_FREQUENT_END_CLOCK
     checkpoint_library = load_checkpoint_library()
     selected_first_checkpoint = config.get("first_checkpoint", "")
     if not selected_first_checkpoint:
@@ -689,6 +1211,30 @@ def review(data_id):
     selected_import_column = data.get("last_imported_checkpoint_column", "")
     if not selected_import_column and source_columns:
         selected_import_column = source_columns[0]
+    selected_frequent_checkpoints = normalize_choice_list(
+        config.get("frequent_checkpoints", []), checkpoint_library
+    )
+    selected_export_columns = normalize_choice_list(
+        config.get("export_columns", []), source_columns
+    )
+    if not selected_export_columns:
+        selected_export_columns = pick_default_export_columns(source_columns)
+
+    min_occurrence_value = config.get("min_occurrence", DEFAULT_FREQUENT_OCCURRENCE)
+    try:
+        min_occurrence_value = int(min_occurrence_value)
+    except (TypeError, ValueError):
+        min_occurrence_value = DEFAULT_FREQUENT_OCCURRENCE
+    if min_occurrence_value <= 0:
+        min_occurrence_value = DEFAULT_FREQUENT_OCCURRENCE
+
+    target_minutes_value = config.get("target_minutes", data.get("default_max_minutes", 30))
+    try:
+        target_minutes_value = float(target_minutes_value)
+    except (TypeError, ValueError):
+        target_minutes_value = float(data.get("default_max_minutes", 30))
+    if target_minutes_value <= 0:
+        target_minutes_value = float(data.get("default_max_minutes", 30))
 
     return render_template(
         "review.html",
@@ -696,6 +1242,7 @@ def review(data_id):
         locations=current_locations,
         plate_types=data.get("plate_types", []),
         default_max_minutes=data.get("default_max_minutes", 30),
+        filter_mode=filter_mode,
         config=config,
         start_time_value=start_time_value,
         end_time_value=end_time_value,
@@ -703,6 +1250,12 @@ def review(data_id):
         prioritized_checkpoint_library=prioritized_checkpoint_library,
         selected_first_checkpoint=selected_first_checkpoint,
         selected_second_checkpoint=selected_second_checkpoint,
+        selected_frequent_checkpoints=selected_frequent_checkpoints,
+        selected_export_columns=selected_export_columns,
+        min_occurrence_value=min_occurrence_value,
+        target_minutes_value=target_minutes_value,
+        frequent_start_clock_value=frequent_start_clock_value,
+        frequent_end_clock_value=frequent_end_clock_value,
         matched_checkpoints=matched_checkpoints,
         source_columns=source_columns,
         selected_import_column=selected_import_column,
@@ -711,215 +1264,190 @@ def review(data_id):
 
 @app.route("/filter/<data_id>", methods=["POST"])
 def filter_results(data_id):
-    """根据本地卡口库中选定的第一/第二卡口和时间窗口筛选车辆记录。"""
+    """根据选择的筛选模式执行过滤。"""
     data = DATA_STORE.get(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
 
     df = data["df"]
+    config = data.get("config", {}).copy()
+    source_columns = data.get("source_columns", [])
     checkpoint_library = set(load_checkpoint_library())
+    current_data_locations = set(data.get("locations", []))
+    plate_types = data.get("plate_types", [])
 
     # 号牌种类排除
-    exclude_plate_types = request.form.getlist("exclude_plate_types")
+    exclude_plate_types = normalize_choice_list(request.form.getlist("exclude_plate_types"), plate_types)
     if exclude_plate_types and "plate_type" in df.columns:
         df = df[~df["plate_type"].isin(exclude_plate_types)]
 
-    first_checkpoint = request.form.get("first_checkpoint", "").strip()
-    second_checkpoint = request.form.get("second_checkpoint", "").strip()
-    if not first_checkpoint:
-        first_checkpoint = request.form.get("entry_checkpoint", "").strip()
-    if not second_checkpoint:
-        second_checkpoint = request.form.get("exit_checkpoint", "").strip()
+    filter_mode = normalize_text_value(request.form.get("filter_mode", FILTER_MODE_PAIR)).lower()
+    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT}:
+        filter_mode = FILTER_MODE_PAIR
 
-    if not first_checkpoint or not second_checkpoint:
-        flash("请分别选择第一卡口和第二卡口。")
-        return redirect(url_for("review", data_id=data_id))
+    config.update(
+        {
+            "filter_mode": filter_mode,
+            "exclude_plate_types": exclude_plate_types,
+        }
+    )
 
-    if first_checkpoint not in checkpoint_library or second_checkpoint not in checkpoint_library:
-        flash("所选卡口不在本地卡口库中，请重新选择。")
-        return redirect(url_for("review", data_id=data_id))
+    if filter_mode == FILTER_MODE_PAIR:
+        start_time_str = normalize_text_value(request.form.get("start_time"))
+        end_time_str = normalize_text_value(request.form.get("end_time"))
+        try:
+            start_time, end_time = parse_time_window(start_time_str, end_time_str)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("review", data_id=data_id))
 
-    if first_checkpoint == second_checkpoint:
-        flash("第一卡口和第二卡口不能相同，请重新选择。")
-        return redirect(url_for("review", data_id=data_id))
+        first_checkpoint = normalize_text_value(request.form.get("first_checkpoint"))
+        second_checkpoint = normalize_text_value(request.form.get("second_checkpoint"))
+        if not first_checkpoint:
+            first_checkpoint = normalize_text_value(request.form.get("entry_checkpoint"))
+        if not second_checkpoint:
+            second_checkpoint = normalize_text_value(request.form.get("exit_checkpoint"))
 
-    current_data_locations = set(data.get("locations", []))
-    active_first_locations = {first_checkpoint}.intersection(current_data_locations)
-    active_second_locations = {second_checkpoint}.intersection(current_data_locations)
+        if not first_checkpoint or not second_checkpoint:
+            flash("请分别选择第一卡口和第二卡口。")
+            return redirect(url_for("review", data_id=data_id))
 
-    if not active_first_locations or not active_second_locations:
-        flash("所选第一或第二卡口未出现在当前通行数据中，请重新选择。")
-        return redirect(url_for("review", data_id=data_id))
+        if first_checkpoint not in checkpoint_library or second_checkpoint not in checkpoint_library:
+            flash("所选卡口不在本地卡口库中，请重新选择。")
+            return redirect(url_for("review", data_id=data_id))
 
-    start_time_str = request.form.get("start_time")
-    end_time_str = request.form.get("end_time")
-    target_minutes = request.form.get("target_minutes", type=float)
+        if first_checkpoint == second_checkpoint:
+            flash("第一卡口和第二卡口不能相同，请重新选择。")
+            return redirect(url_for("review", data_id=data_id))
 
-    if not start_time_str or not end_time_str or target_minutes is None:
-        flash("请输入完整的筛选时间段和目标过车间隔。")
-        return redirect(url_for("review", data_id=data_id))
+        active_first_locations = {first_checkpoint}.intersection(current_data_locations)
+        active_second_locations = {second_checkpoint}.intersection(current_data_locations)
 
-    try:
-        start_time = datetime.fromisoformat(start_time_str)
-        end_time = datetime.fromisoformat(end_time_str)
-    except ValueError:
-        flash("时间段格式不正确，请重新选择。")
-        return redirect(url_for("review", data_id=data_id))
+        if not active_first_locations or not active_second_locations:
+            flash("所选第一或第二卡口未出现在当前通行数据中，请重新选择。")
+            return redirect(url_for("review", data_id=data_id))
 
-    if start_time >= end_time or target_minutes <= 0:
-        flash("请确保开始时间早于结束时间，且目标过车间隔大于 0。")
-        return redirect(url_for("review", data_id=data_id))
+        target_minutes = request.form.get("target_minutes", type=float)
+        if target_minutes is None or target_minutes <= 0:
+            flash("请填写正确的目标过车间隔（分钟）。")
+            return redirect(url_for("review", data_id=data_id))
 
-    DATA_STORE[data_id]["config"] = {
-        "exclude_plate_types": exclude_plate_types,
-        "first_checkpoint": first_checkpoint,
-        "second_checkpoint": second_checkpoint,
-        "entry_checkpoint": first_checkpoint,  # 兼容历史字段
-        "exit_checkpoint": second_checkpoint,  # 兼容历史字段
-        "start_time": start_time_str,
-        "end_time": end_time_str,
-        "target_minutes": target_minutes,
-    }
-
-    valid_locations = active_first_locations.union(active_second_locations)
-    df_valid = df[df["location"].isin(valid_locations)].copy()
-    df_valid = df_valid[(df_valid["time"] >= start_time) & (df_valid["time"] <= end_time)]
-    df_valid = df_valid.sort_values("time")
-
-    results = []
-
-    # 按车牌分组，寻找第一卡口到第二卡口的时间顺序配对
-    for plate, group in df_valid.groupby("plate"):
-        first_events = group[group["location"].isin(active_first_locations)]
-        second_events = group[group["location"].isin(active_second_locations)]
-
-        if first_events.empty or second_events.empty:
-            continue
-
-        second_list = list(second_events.itertuples(index=False))
-
-        for first_row in first_events.itertuples(index=False):
-            first_time = first_row.time
-            best_second = None
-            best_delta = None
-
-            for second_row in second_list:
-                second_time = second_row.time
-                if second_time <= first_time:
-                    continue
-                delta = second_time - first_time
-                best_second = second_row
-                best_delta = delta
-                break
-
-            if best_second and best_delta is not None:
-                first_time_out = first_time
-                first_location_out = first_row.location
-                second_time_out = best_second.time
-                second_location_out = best_second.location
-
-                if "plate_type" in df.columns:
-                    plate_type_out = getattr(first_row, "plate_type", "")
-                else:
-                    plate_type_out = ""
-
-                delta_minutes = best_delta.total_seconds() / 60.0
-
-                # 根据与目标间隔的接近程度打分并分级
-                diff = abs(delta_minutes - target_minutes)
-                if target_minutes > 0:
-                    # 将差值按目标间隔归一化到 0-1 之间，差值为 0 时得分 100，差值等于目标间隔时得分约为 0
-                    normalized = diff / target_minutes
-                    raw_score = max(0.0, 1.0 - normalized)
-                    score = int(round(raw_score * 100))
-                else:
-                    score = 0
-
-                if score >= 70:
-                    level = "red"
-                elif score >= 40:
-                    level = "yellow"
-                else:
-                    level = "blue"
-
-                results.append(
-                    {
-                        "plate": plate,
-                        "plate_type": plate_type_out,
-                        "first_time": first_time_out,
-                        "first_location": first_location_out,
-                        "second_time": second_time_out,
-                        "second_location": second_location_out,
-                        "delta_minutes": delta_minutes,
-                        "score": score,
-                        "level": level,
-                    }
-                )
-
-    # 保存用于下载的 DataFrame
-    if results:
-        filtered_df = pd.DataFrame(results)
-        filtered_df = filtered_df.sort_values("score", ascending=False)
-    else:
-        filtered_df = pd.DataFrame(
-            columns=[
-                "plate",
-                "plate_type",
-                "first_time",
-                "first_location",
-                "second_time",
-                "second_location",
-                "delta_minutes",
-            ]
+        filtered_df = build_pair_filtered_dataframe(
+            df=df,
+            start_time=start_time,
+            end_time=end_time,
+            active_first_locations=active_first_locations,
+            active_second_locations=active_second_locations,
+            target_minutes=target_minutes,
         )
+        display_results = build_pair_display_results(filtered_df)
+        summary = build_results_summary(filtered_df)
 
-    DATA_STORE[data_id]["filtered"] = filtered_df
-
-    # 准备展示用的数据（格式化时间）
-    display_results = []
-    for row in filtered_df.itertuples(index=False):
-        plate_type_val = (
-            str(row.plate_type)
-            if hasattr(row, "plate_type") and pd.notnull(row.plate_type)
-            else ""
-        )
-        delta_val = float(row.delta_minutes) if pd.notnull(row.delta_minutes) else 0.0
-        score_val = int(row.score) if hasattr(row, "score") and pd.notnull(row.score) else 0
-        level_val = str(row.level) if hasattr(row, "level") and pd.notnull(row.level) else ""
-        level_label = get_risk_label(level_val)
-        display_results.append(
+        config.update(
             {
-                "plate": row.plate,
-                "plate_type": plate_type_val,
-                "first_time": row.first_time.strftime("%Y-%m-%d %H:%M:%S")
-                if pd.notnull(row.first_time)
-                else "",
-                "first_location": row.first_location,
-                "second_time": row.second_time.strftime("%Y-%m-%d %H:%M:%S")
-                if pd.notnull(row.second_time)
-                else "",
-                "second_location": row.second_location,
-                "delta_minutes": delta_val,
-                "score": score_val,
-                "level": level_val,
-                "level_label": level_label,
+                "first_checkpoint": first_checkpoint,
+                "second_checkpoint": second_checkpoint,
+                "entry_checkpoint": first_checkpoint,  # 兼容历史字段
+                "exit_checkpoint": second_checkpoint,  # 兼容历史字段
+                "start_time": start_time_str,
+                "end_time": end_time_str,
+                "target_minutes": target_minutes,
             }
         )
 
-    summary = build_results_summary(filtered_df)
+        DATA_STORE[data_id]["config"] = config
+        DATA_STORE[data_id]["filtered"] = filtered_df
+        DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_PAIR
+
+        return render_template(
+            "results.html",
+            data_id=data_id,
+            filter_mode=FILTER_MODE_PAIR,
+            results=display_results,
+            summary=summary,
+            selected_export_columns=[],
+        )
+
+    selected_checkpoints = normalize_choice_list(
+        request.form.getlist("frequent_checkpoints"), checkpoint_library
+    )
+    if not selected_checkpoints:
+        flash("请至少选择一个卡口用于频繁出现筛选。")
+        return redirect(url_for("review", data_id=data_id))
+
+    active_checkpoints = sorted(set(selected_checkpoints).intersection(current_data_locations))
+    if not active_checkpoints:
+        flash("所选卡口未出现在当前通行数据中，请重新选择。")
+        return redirect(url_for("review", data_id=data_id))
+
+    min_occurrence = request.form.get("min_occurrence", type=int)
+    if min_occurrence is None:
+        min_occurrence = DEFAULT_FREQUENT_OCCURRENCE
+    if min_occurrence <= 0:
+        flash("出现次数必须大于 0。")
+        return redirect(url_for("review", data_id=data_id))
+
+    frequent_start_clock_str = normalize_text_value(request.form.get("frequent_start_clock"))
+    frequent_end_clock_str = normalize_text_value(request.form.get("frequent_end_clock"))
+    try:
+        frequent_start_clock, frequent_end_clock = parse_clock_window(
+            frequent_start_clock_str, frequent_end_clock_str
+        )
+    except ValueError as exc:
+        flash(str(exc))
+        return redirect(url_for("review", data_id=data_id))
+
+    selected_export_columns = normalize_choice_list(
+        request.form.getlist("export_columns"), source_columns
+    )
+    if not selected_export_columns:
+        selected_export_columns = pick_default_export_columns(source_columns)
+
+    filtered_df, matched_records = build_frequent_filtered_dataframe(
+        df=df,
+        start_clock=frequent_start_clock,
+        end_clock=frequent_end_clock,
+        active_checkpoints=active_checkpoints,
+        min_occurrence=min_occurrence,
+        selected_export_columns=selected_export_columns,
+    )
+    display_results = build_frequent_display_results(
+        filtered_df,
+        threshold=min_occurrence,
+        selected_export_columns=selected_export_columns,
+    )
+    summary = build_frequent_results_summary(
+        filtered_df, matched_records=matched_records, threshold=min_occurrence
+    )
+
+    config.update(
+        {
+            "frequent_checkpoints": selected_checkpoints,
+            "min_occurrence": min_occurrence,
+            "frequent_start_clock": frequent_start_clock.strftime("%H:%M"),
+            "frequent_end_clock": frequent_end_clock.strftime("%H:%M"),
+            "export_columns": selected_export_columns,
+        }
+    )
+
+    DATA_STORE[data_id]["config"] = config
+    DATA_STORE[data_id]["filtered"] = filtered_df
+    DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_FREQUENT
 
     return render_template(
         "results.html",
         data_id=data_id,
+        filter_mode=FILTER_MODE_FREQUENT,
         results=display_results,
         summary=summary,
+        selected_export_columns=selected_export_columns,
     )
 
 
 @app.route("/download/<data_id>", methods=["GET"])
 def download(data_id):
-    """下载筛选后的结果为带风险底色的 Excel 文件。"""
+    """下载筛选结果。"""
     data = DATA_STORE.get(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
@@ -930,10 +1458,25 @@ def download(data_id):
         flash("没有可下载的结果，请先完成筛选。")
         return redirect(url_for("upload_form"))
 
-    export_df, risk_levels = build_export_dataframe(filtered_df)
-    summary = build_results_summary(filtered_df)
-    output = build_warning_workbook(export_df, risk_levels, summary)
-    filename = "筛选结果_警戒色.xlsx"
+    config = data.get("config", {})
+    filter_mode = normalize_text_value(data.get("filtered_mode") or config.get("filter_mode"))
+
+    if filter_mode == FILTER_MODE_FREQUENT:
+        source_columns = data.get("source_columns", [])
+        selected_export_columns = normalize_choice_list(
+            config.get("export_columns", []), source_columns
+        )
+        if not selected_export_columns:
+            selected_export_columns = pick_default_export_columns(source_columns)
+
+        export_df = build_frequent_export_dataframe(filtered_df, selected_export_columns)
+        output = build_plain_workbook(export_df, sheet_name="频繁出现车辆")
+        filename = "频繁出现车辆筛选结果.xlsx"
+    else:
+        export_df, risk_levels = build_export_dataframe(filtered_df)
+        summary = build_results_summary(filtered_df)
+        output = build_warning_workbook(export_df, risk_levels, summary)
+        filename = "筛选结果_警戒色.xlsx"
 
     return send_file(
         output,

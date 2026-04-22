@@ -1,5 +1,7 @@
 import os
 import json
+import sqlite3
+import time
 import uuid
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -28,6 +30,63 @@ PAGE_SIZE = 100
 
 # 简单的内存数据存储，适合本地单用户使用
 DATA_STORE = {}
+
+# 会话过期时间（秒）
+SESSION_TTL_SECONDS = 2 * 3600  # 2小时
+
+
+def _db_path(data_id):
+    """返回会话对应的 SQLite 文件路径。"""
+    return os.path.join(app.config["UPLOAD_FOLDER"], f"{data_id}.db")
+
+
+def _save_df(df, data_id, table):
+    """将 DataFrame 写入 SQLite 表。"""
+    conn = sqlite3.connect(_db_path(data_id))
+    try:
+        df.to_sql(table, conn, if_exists="replace", index=False)
+    finally:
+        conn.close()
+
+
+def _load_df(data_id, table):
+    """从 SQLite 读取整张表为 DataFrame。"""
+    conn = sqlite3.connect(_db_path(data_id))
+    try:
+        return pd.read_sql(f"SELECT * FROM [{table}]", conn)
+    finally:
+        conn.close()
+
+
+def _restore_raw_dtypes(df):
+    """raw_data 从 SQLite 读回后恢复 time 列类型。"""
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    return df
+
+
+def _restore_pair_dtypes(df):
+    """pair 筛选结果恢复时间列类型。"""
+    for col in ("first_time", "second_time"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+def _restore_frequent_dtypes(df):
+    """频繁模式结果恢复时间列和布尔列。"""
+    for col in ("first_time", "last_time", "event_time"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    if "group_first" in df.columns:
+        df["group_first"] = df["group_first"].astype(bool)
+    return df
+
+
+def _touch_session(data_id):
+    """更新会话最后访问时间。"""
+    if data_id in DATA_STORE:
+        DATA_STORE[data_id]["last_access"] = time.time()
 
 RISK_LEVEL_META = {
     "red": {"label": "高风险", "style": 4},
@@ -733,7 +792,7 @@ def build_export_dataframe(filtered_df):
 
 
 def build_frequent_export_dataframe(filtered_df, selected_export_columns, threshold):
-    """构造频繁出现模式导出表，并返回需要合并的单元格信息。"""
+    """构造频繁出现模式导出表，并返回需要合并的单元格信息和风险级别列表。"""
     summary_columns = [
         "车牌号",
         "号牌种类",
@@ -753,15 +812,17 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
     all_columns = summary_columns + detail_columns + selected_export_columns
 
     if filtered_df is None or filtered_df.empty:
-        return pd.DataFrame(columns=all_columns), []
+        return pd.DataFrame(columns=all_columns), [], []
 
     export_rows = []
     merge_ranges = []
+    risk_levels = []
     excel_row = 2
 
     for row in filtered_df.to_dict(orient="records"):
         occurrence_count = int(row.get("occurrence_count", 0) or 0)
-        _, level_label = get_frequent_level(occurrence_count, threshold)
+        level, level_label = get_frequent_level(occurrence_count, threshold)
+        risk_levels.append(level)
 
         export_row = {
             "车牌号": normalize_text_value(row.get("plate", "")),
@@ -793,7 +854,7 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
         excel_row += 1
 
     export_df = pd.DataFrame(export_rows)
-    return export_df[all_columns], merge_ranges
+    return export_df[all_columns], merge_ranges, risk_levels
 
 
 def excel_column_name(index):
@@ -818,83 +879,44 @@ def build_xlsx_inline_cell(ref, value, style_id):
     )
 
 
-def build_warning_workbook(export_df, risk_levels, summary):
-    """生成带风险底色的 xlsx 文件。"""
-    output = BytesIO()
-    columns = export_df.columns.tolist()
-    last_col = excel_column_name(len(columns))
-    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    summary_text = (
-        f"高风险 {summary['red']} 条  |  中风险 {summary['yellow']} 条  |  "
-        f"低风险 {summary['blue']} 条  |  共 {summary['total']} 条"
-    )
+# ---- OOXML 模板常量（build_warning_workbook / build_frequent_warning_workbook 共用） ----
 
-    row_parts = []
-    row_parts.append(
-        '<row r="1" ht="28" customHeight="1">'
-        + build_xlsx_inline_cell("A1", "车辆进出筛选风险结果", 1)
-        + "</row>"
-    )
-    row_parts.append(
-        '<row r="2" ht="22" customHeight="1">'
-        + build_xlsx_inline_cell("A2", summary_text, 2)
-        + "</row>"
-    )
-    row_parts.append(
-        '<row r="3" ht="22" customHeight="1">'
-        + build_xlsx_inline_cell("A3", f"导出时间：{exported_at}", 2)
-        + "</row>"
-    )
-
-    header_cells = []
-    for idx, column in enumerate(columns, start=1):
-        header_cells.append(build_xlsx_inline_cell(f"{excel_column_name(idx)}4", column, 3))
-    row_parts.append('<row r="4" ht="26" customHeight="1">' + "".join(header_cells) + "</row>")
-
-    for row_index, (row, level) in enumerate(
-        zip(export_df.itertuples(index=False), risk_levels), start=5
-    ):
-        style_id = RISK_LEVEL_META.get(level, {}).get("style", 0)
-        data_cells = []
-        for col_index, value in enumerate(row, start=1):
-            cell_ref = f"{excel_column_name(col_index)}{row_index}"
-            data_cells.append(build_xlsx_inline_cell(cell_ref, value, style_id))
-        row_parts.append(
-            f'<row r="{row_index}" ht="24" customHeight="1">{"".join(data_cells)}</row>'
-        )
-
-    last_row = len(export_df) + 4
-    merge_refs = (
-        f'<mergeCells count="3">'
-        f'<mergeCell ref="A1:{last_col}1"/>'
-        f'<mergeCell ref="A2:{last_col}2"/>'
-        f'<mergeCell ref="A3:{last_col}3"/>'
-        f"</mergeCells>"
-    )
-    column_widths = [14, 14, 21, 18, 21, 18, 14, 10, 12]
-    cols_xml = "".join(
-        f'<col min="{idx}" max="{idx}" width="{width}" customWidth="1"/>'
-        for idx, width in enumerate(column_widths, start=1)
-    )
-
-    sheet_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:{last_col}{last_row}"/>
-  <sheetViews>
-    <sheetView workbookViewId="0">
-      <pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/>
-    </sheetView>
-  </sheetViews>
-  <sheetFormatPr defaultRowHeight="22"/>
-  <cols>{cols_xml}</cols>
-  <sheetData>{"".join(row_parts)}</sheetData>
-  <autoFilter ref="A4:{last_col}{last_row}"/>
-  {merge_refs}
-  <pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.2" footer="0.2"/>
-</worksheet>
+WORKBOOK_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="筛选结果" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>
 """
 
-    styles_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+WORKBOOK_RELS_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>
+"""
+
+RELS_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>
+"""
+
+CONTENT_TYPES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>
+"""
+
+STYLES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <fonts count="3">
     <font><sz val="11"/><color rgb="FF1F2937"/><name val="Microsoft YaHei UI"/><family val="2"/></font>
@@ -938,39 +960,81 @@ def build_warning_workbook(export_df, risk_levels, summary):
 </styleSheet>
 """
 
-    workbook_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets>
-    <sheet name="筛选结果" sheetId="1" r:id="rId1"/>
-  </sheets>
-</workbook>
-"""
 
-    workbook_rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>
-"""
+def build_warning_workbook(export_df, risk_levels, summary):
+    """生成带风险底色的 xlsx 文件。"""
+    output = BytesIO()
+    columns = export_df.columns.tolist()
+    last_col = excel_column_name(len(columns))
+    last_row = len(export_df) + 4
+    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    summary_text = (
+        f"高风险 {summary['red']} 条  |  中风险 {summary['yellow']} 条  |  "
+        f"低风险 {summary['blue']} 条  |  共 {summary['total']} 条"
+    )
 
-    root_rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
-  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
-</Relationships>
-"""
+    row_parts = []
+    row_parts.append(
+        '<row r="1" ht="28" customHeight="1">'
+        + build_xlsx_inline_cell("A1", "车辆进出筛选风险结果", 1)
+        + "</row>"
+    )
+    row_parts.append(
+        '<row r="2" ht="22" customHeight="1">'
+        + build_xlsx_inline_cell("A2", summary_text, 2)
+        + "</row>"
+    )
+    row_parts.append(
+        '<row r="3" ht="22" customHeight="1">'
+        + build_xlsx_inline_cell("A3", f"导出时间：{exported_at}", 2)
+        + "</row>"
+    )
 
-    content_types_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
-  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
-</Types>
+    header_cells = []
+    for idx, column in enumerate(columns, start=1):
+        header_cells.append(build_xlsx_inline_cell(f"{excel_column_name(idx)}4", column, 3))
+    row_parts.append('<row r="4" ht="26" customHeight="1">' + "".join(header_cells) + "</row>")
+
+    for row_index, (row, level) in enumerate(
+        zip(export_df.itertuples(index=False), risk_levels), start=5
+    ):
+        style_id = RISK_LEVEL_META.get(level, {}).get("style", 0)
+        data_cells = []
+        for col_index, value in enumerate(row, start=1):
+            cell_ref = f"{excel_column_name(col_index)}{row_index}"
+            data_cells.append(build_xlsx_inline_cell(cell_ref, value, style_id))
+        row_parts.append(
+            f'<row r="{row_index}" ht="24" customHeight="1">{"".join(data_cells)}</row>'
+        )
+
+    merge_refs = (
+        f'<mergeCells count="3">'
+        f'<mergeCell ref="A1:{last_col}1"/>'
+        f'<mergeCell ref="A2:{last_col}2"/>'
+        f'<mergeCell ref="A3:{last_col}3"/>'
+        f"</mergeCells>"
+    )
+    column_widths = [14, 14, 21, 18, 21, 18, 14, 10, 12]
+    cols_xml = "".join(
+        f'<col min="{idx}" max="{idx}" width="{width}" customWidth="1"/>'
+        for idx, width in enumerate(column_widths, start=1)
+    )
+
+    sheet_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:{last_col}{last_row}"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="22"/>
+  <cols>{cols_xml}</cols>
+  <sheetData>{"".join(row_parts)}</sheetData>
+  <autoFilter ref="A4:{last_col}{last_row}"/>
+  {merge_refs}
+  <pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.2" footer="0.2"/>
+</worksheet>
 """
 
     created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -990,35 +1054,125 @@ def build_warning_workbook(export_df, risk_levels, summary):
 """
 
     with ZipFile(output, "w", ZIP_DEFLATED) as workbook:
-        workbook.writestr("[Content_Types].xml", content_types_xml)
-        workbook.writestr("_rels/.rels", root_rels_xml)
+        workbook.writestr("[Content_Types].xml", CONTENT_TYPES_XML)
+        workbook.writestr("_rels/.rels", RELS_XML)
         workbook.writestr("docProps/core.xml", core_xml)
         workbook.writestr("docProps/app.xml", app_xml)
-        workbook.writestr("xl/workbook.xml", workbook_xml)
-        workbook.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
-        workbook.writestr("xl/styles.xml", styles_xml)
+        workbook.writestr("xl/workbook.xml", WORKBOOK_XML)
+        workbook.writestr("xl/_rels/workbook.xml.rels", WORKBOOK_RELS_XML)
+        workbook.writestr("xl/styles.xml", STYLES_XML)
         workbook.writestr("xl/worksheets/sheet1.xml", sheet_xml)
 
     output.seek(0)
     return output
 
 
-def build_plain_workbook(export_df, sheet_name, merge_ranges=None):
-    """生成普通 xlsx 文件，可选合并单元格。使用 xlsxwriter 引擎提升写入性能。"""
+def build_frequent_warning_workbook(export_df, risk_levels, summary, merge_ranges):
+    """生成频繁出现模式带风险底色的 xlsx 文件，支持合并单元格。"""
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        export_df.to_excel(writer, index=False, sheet_name=sheet_name)
-        if merge_ranges:
-            worksheet = writer.sheets[sheet_name]
-            for start_row, end_row, column_idx in merge_ranges:
-                # merge_ranges 来自 openpyxl 的 1-based 索引，转为 xlsxwriter 的 0-based
-                r0 = int(start_row) - 1
-                r1 = int(end_row) - 1
-                c = int(column_idx) - 1
-                worksheet.merge_range(
-                    r0, c, r1, c,
-                    export_df.iloc[r0, c] if r0 < len(export_df) else "",
-                )
+    columns = export_df.columns.tolist()
+    last_col = excel_column_name(len(columns))
+    last_row = len(export_df) + 4
+    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    summary_text = (
+        f"高频 {summary.get('red', 0)} 条  |  关注 {summary.get('yellow', 0)} 条  |  "
+        f"达标 {summary.get('blue', 0)} 条  |  共 {summary.get('total', 0)} 条"
+    )
+
+    row_parts = []
+    row_parts.append(
+        '<row r="1" ht="28" customHeight="1">'
+        + build_xlsx_inline_cell("A1", "频繁出现车辆筛选结果", 1)
+        + "</row>"
+    )
+    row_parts.append(
+        '<row r="2" ht="22" customHeight="1">'
+        + build_xlsx_inline_cell("A2", summary_text, 2)
+        + "</row>"
+    )
+    row_parts.append(
+        '<row r="3" ht="22" customHeight="1">'
+        + build_xlsx_inline_cell("A3", f"导出时间：{exported_at}", 2)
+        + "</row>"
+    )
+
+    header_cells = []
+    for idx, column in enumerate(columns, start=1):
+        header_cells.append(build_xlsx_inline_cell(f"{excel_column_name(idx)}4", column, 3))
+    row_parts.append('<row r="4" ht="26" customHeight="1">' + "".join(header_cells) + "</row>")
+
+    for row_index, (row, level) in enumerate(
+        zip(export_df.itertuples(index=False), risk_levels), start=5
+    ):
+        style_id = RISK_LEVEL_META.get(level, {}).get("style", 0)
+        data_cells = []
+        for col_index, value in enumerate(row, start=1):
+            cell_ref = f"{excel_column_name(col_index)}{row_index}"
+            data_cells.append(build_xlsx_inline_cell(cell_ref, value, style_id))
+        row_parts.append(
+            f'<row r="{row_index}" ht="24" customHeight="1">{"".join(data_cells)}</row>'
+        )
+
+    merge_cell_parts = [
+        f'<mergeCell ref="A1:{last_col}1"/>',
+        f'<mergeCell ref="A2:{last_col}2"/>',
+        f'<mergeCell ref="A3:{last_col}3"/>',
+    ]
+    for start_row, end_row, column_idx in merge_ranges:
+        col_name = excel_column_name(column_idx)
+        merge_cell_parts.append(f'<mergeCell ref="{col_name}{start_row}:{col_name}{end_row}"/>')
+    merge_refs = f'<mergeCells count="{len(merge_cell_parts)}">{"".join(merge_cell_parts)}</mergeCells>'
+
+    col_count = len(columns)
+    column_widths = [14] * col_count
+    cols_xml = "".join(
+        f'<col min="{idx}" max="{idx}" width="{w}" customWidth="1"/>'
+        for idx, w in enumerate(column_widths, start=1)
+    )
+
+    sheet_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:{last_col}{last_row}"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="22"/>
+  <cols>{cols_xml}</cols>
+  <sheetData>{"".join(row_parts)}</sheetData>
+  <autoFilter ref="A4:{last_col}{last_row}"/>
+  {merge_refs}
+  <pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.2" footer="0.2"/>
+</worksheet>
+"""
+
+    created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    core_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:creator>Codex</dc:creator>
+  <cp:lastModifiedBy>Codex</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">{created_at}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">{created_at}</dcterms:modified>
+</cp:coreProperties>
+"""
+
+    app_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Microsoft Excel</Application>
+</Properties>
+"""
+
+    with ZipFile(output, "w", ZIP_DEFLATED) as workbook:
+        workbook.writestr("[Content_Types].xml", CONTENT_TYPES_XML)
+        workbook.writestr("_rels/.rels", RELS_XML)
+        workbook.writestr("docProps/core.xml", core_xml)
+        workbook.writestr("docProps/app.xml", app_xml)
+        workbook.writestr("xl/workbook.xml", WORKBOOK_XML.replace("筛选结果", "频繁出现车辆"))
+        workbook.writestr("xl/_rels/workbook.xml.rels", WORKBOOK_RELS_XML)
+        workbook.writestr("xl/styles.xml", STYLES_XML)
+        workbook.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
     output.seek(0)
     return output
 
@@ -1053,6 +1207,9 @@ def _is_overlapping_column(column_name):
             if normalize_text_value(cand).lower() == col_lower:
                 return True
     return False
+
+
+def parse_excel(path):
     """读取并标准化 Excel 数据，返回标准化数据和原始列名。"""
     plate_candidates = [
         "车牌号", "车牌号码", "车牌", "号牌号码",
@@ -1180,6 +1337,24 @@ def import_checkpoints_from_dataframe(df, column_name, source_columns):
     return checkpoints, 1
 
 
+@app.before_request
+def _cleanup_sessions():
+    """清理过期的会话数据及对应的 SQLite 文件。"""
+    now = time.time()
+    expired = [
+        did
+        for did, meta in DATA_STORE.items()
+        if now - meta.get("last_access", 0) > SESSION_TTL_SECONDS
+    ]
+    for did in expired:
+        db_file = DATA_STORE.pop(did, {}).get("db_path")
+        if db_file and os.path.exists(db_file):
+            try:
+                os.remove(db_file)
+            except OSError:
+                pass
+
+
 @app.route("/", methods=["GET"])
 def upload_form():
     """上传页面。"""
@@ -1206,7 +1381,6 @@ def upload():
         return redirect(url_for("upload_form"))
 
     dfs = []
-    uploaded_filepaths = []
     source_columns = []
     source_column_set = set()
 
@@ -1216,7 +1390,6 @@ def upload():
             return redirect(url_for("upload_form"))
 
         filepath = save_uploaded_excel(file)
-        uploaded_filepaths.append(filepath)
 
         try:
             df_part, file_columns = parse_excel(filepath)
@@ -1235,32 +1408,33 @@ def upload():
         return redirect(url_for("upload_form"))
 
     df = pd.concat(dfs, ignore_index=True)
-    # 对高频重复的字符串列做 category 编码，降低内存占用
-    for col in ("plate", "location", "plate_type"):
-        if col in df.columns:
-            df[col] = df[col].astype("category")
     locations = sorted(df["location"].dropna().unique().tolist())
-    plate_type_series = df.get("plate_type", pd.Series(dtype=object))
-    plate_type_values = [normalize_text_value(value) for value in plate_type_series.tolist()]
+    plate_type_values = [normalize_text_value(v) for v in df.get("plate_type", pd.Series(dtype=object)).tolist()]
     plate_types = sorted({value for value in plate_type_values if value})
 
     data_id = str(uuid.uuid4())
-    default_max_minutes = 30.0  # 初始默认值，在下一步页面可修改
+    default_max_minutes = 30.0
     default_start_time = format_datetime_local(df["time"].min())
     default_end_time = format_datetime_local(df["time"].max())
     default_export_columns = pick_default_export_columns(source_columns)
 
+    # DataFrame 持久化到 SQLite，不在内存中保留
+    _save_df(df, data_id, "raw_data")
+    del df
+    del dfs
+
     DATA_STORE[data_id] = {
-        "df": df,
+        "db_path": _db_path(data_id),
         "locations": locations,
         "plate_types": plate_types,
-        "filtered": None,
-        "uploaded_filepaths": uploaded_filepaths,
         "source_columns": source_columns,
         "last_imported_checkpoint_column": "",
         "default_max_minutes": default_max_minutes,
         "default_start_time": default_start_time,
         "default_end_time": default_end_time,
+        "filtered_mode": None,
+        "summary": None,
+        "selected_export_columns": [],
         "config": {
             "filter_mode": FILTER_MODE_PAIR,
             "min_occurrence": DEFAULT_FREQUENT_OCCURRENCE,
@@ -1271,6 +1445,7 @@ def upload():
             "end_time": default_end_time,
             "target_minutes": default_max_minutes,
         },
+        "last_access": time.time(),
     }
 
     return redirect(url_for("review", data_id=data_id))
@@ -1289,9 +1464,10 @@ def import_checkpoint_from_uploaded(data_id):
         flash("请选择要导入的卡口列。")
         return redirect(url_for("review", data_id=data_id))
 
-    df = data.get("df")
     source_columns = data.get("source_columns", [])
-    if df is None:
+    try:
+        df = _restore_raw_dtypes(_load_df(data_id, "raw_data"))
+    except Exception:
         flash("未找到已解析数据，请重新上传后再试。")
         return redirect(url_for("upload_form"))
 
@@ -1308,6 +1484,7 @@ def import_checkpoint_from_uploaded(data_id):
     new_count = len(set(merged_checkpoints) - set(existing_checkpoints))
 
     data["last_imported_checkpoint_column"] = column_name
+    _touch_session(data_id)
     flash(
         f"已从'{column_name}'导入卡口，识别 {len(imported_checkpoints)} 个卡口，新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
     )
@@ -1340,6 +1517,7 @@ def delete_checkpoints_from_library(data_id):
     config = data.get("config", {})
     data["config"] = prune_removed_checkpoints_from_config(config, selected_checkpoints)
 
+    _touch_session(data_id)
     flash(
         f"已删除 {len(selected_checkpoints)} 个卡口，本地卡口库剩余 {len(updated_library)} 个。"
     )
@@ -1439,6 +1617,7 @@ def review(data_id):
     if target_minutes_value <= 0:
         target_minutes_value = float(data.get("default_max_minutes", 30))
 
+    _touch_session(data_id)
     return render_template(
         "review.html",
         data_id=data_id,
@@ -1477,7 +1656,7 @@ def filter_results(data_id):
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
 
-    df = data["df"]
+    df = _restore_raw_dtypes(_load_df(data_id, "raw_data"))
     config = data.get("config", {}).copy()
     source_columns = data.get("source_columns", [])
     checkpoint_library = set(load_checkpoint_library())
@@ -1548,8 +1727,9 @@ def filter_results(data_id):
             active_second_locations=active_second_locations,
             target_minutes=target_minutes,
         )
-        display_results = build_pair_display_results(filtered_df)
         summary = build_results_summary(filtered_df)
+        _save_df(filtered_df, data_id, "filtered_data")
+        del df, filtered_df
 
         config.update(
             {
@@ -1564,11 +1744,10 @@ def filter_results(data_id):
         )
 
         DATA_STORE[data_id]["config"] = config
-        DATA_STORE[data_id]["filtered"] = filtered_df
         DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_PAIR
-        DATA_STORE[data_id]["display_results"] = display_results
         DATA_STORE[data_id]["summary"] = summary
         DATA_STORE[data_id]["selected_export_columns"] = []
+        DATA_STORE[data_id]["last_access"] = time.time()
 
         return redirect(url_for("show_results", data_id=data_id))
 
@@ -1624,13 +1803,10 @@ def filter_results(data_id):
         active_checkpoints=active_checkpoints,
         min_occurrence=min_occurrence,
     )
-    display_results = build_frequent_display_results(
-        filtered_df,
-        threshold=min_occurrence,
-        selected_export_columns=selected_export_columns,
-    )
     summary = build_frequent_results_summary(filtered_df, matched_records=matched_records, threshold=min_occurrence)
     summary["total_vehicles"] = filtered_vehicle_count
+    _save_df(filtered_df, data_id, "filtered_data")
+    del df, filtered_df
 
     config.update(
         {
@@ -1643,11 +1819,10 @@ def filter_results(data_id):
     )
 
     DATA_STORE[data_id]["config"] = config
-    DATA_STORE[data_id]["filtered"] = filtered_df
     DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_FREQUENT
-    DATA_STORE[data_id]["display_results"] = display_results
     DATA_STORE[data_id]["summary"] = summary
     DATA_STORE[data_id]["selected_export_columns"] = selected_export_columns
+    DATA_STORE[data_id]["last_access"] = time.time()
 
     return redirect(url_for("show_results", data_id=data_id))
 
@@ -1660,20 +1835,35 @@ def show_results(data_id):
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
 
-    display_results = data.get("display_results")
-    if display_results is None:
+    filter_mode = data.get("filtered_mode")
+    if not filter_mode:
         flash("请先完成筛选。")
         return redirect(url_for("review", data_id=data_id))
 
-    filter_mode = data.get("filtered_mode", FILTER_MODE_PAIR)
     summary = data.get("summary", {})
     selected_export_columns = data.get("selected_export_columns", [])
+    config = data.get("config", {})
+
+    # 从 SQLite 加载筛选结果并重建 display_results
+    filtered_df = _load_df(data_id, "filtered_data")
+    if filter_mode == FILTER_MODE_PAIR:
+        filtered_df = _restore_pair_dtypes(filtered_df)
+        display_results = build_pair_display_results(filtered_df)
+    else:
+        filtered_df = _restore_frequent_dtypes(filtered_df)
+        threshold = config.get("min_occurrence", DEFAULT_FREQUENT_OCCURRENCE)
+        export_cols = selected_export_columns or config.get("export_columns", [])
+        display_results = build_frequent_display_results(
+            filtered_df, threshold=threshold, selected_export_columns=export_cols,
+        )
+    del filtered_df
 
     page = request.args.get("page", 1, type=int)
     page_results, total_pages, has_prev, has_next = paginate_results(
         display_results, page, filter_mode
     )
 
+    _touch_session(data_id)
     return render_template(
         "results.html",
         data_id=data_id,
@@ -1697,15 +1887,20 @@ def download(data_id):
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
 
-    filtered_df = data.get("filtered")
+    filter_mode = normalize_text_value(data.get("filtered_mode") or data.get("config", {}).get("filter_mode"))
+    if not filter_mode:
+        flash("没有可下载的结果，请先完成筛选。")
+        return redirect(url_for("upload_form"))
+
+    filtered_df = _load_df(data_id, "filtered_data")
     if filtered_df is None or filtered_df.empty:
         flash("没有可下载的结果，请先完成筛选。")
         return redirect(url_for("upload_form"))
 
     config = data.get("config", {})
-    filter_mode = normalize_text_value(data.get("filtered_mode") or config.get("filter_mode"))
 
     if filter_mode == FILTER_MODE_FREQUENT:
+        filtered_df = _restore_frequent_dtypes(filtered_df)
         source_columns = data.get("source_columns", [])
         selected_export_columns = normalize_choice_list(
             config.get("export_columns", []), source_columns
@@ -1719,23 +1914,26 @@ def download(data_id):
             threshold = DEFAULT_FREQUENT_OCCURRENCE
         if threshold <= 0:
             threshold = DEFAULT_FREQUENT_OCCURRENCE
-        export_df, merge_ranges = build_frequent_export_dataframe(
+        export_df, merge_ranges, risk_levels = build_frequent_export_dataframe(
             filtered_df,
             selected_export_columns,
             threshold=threshold,
         )
-        output = build_plain_workbook(
-            export_df,
-            sheet_name="频繁出现车辆",
-            merge_ranges=merge_ranges,
+        frequent_summary = data.get("summary") or build_frequent_results_summary(
+            filtered_df, matched_records=len(filtered_df), threshold=threshold,
+        )
+        output = build_frequent_warning_workbook(
+            export_df, risk_levels, frequent_summary, merge_ranges,
         )
         filename = "频繁出现车辆筛选结果.xlsx"
     else:
+        filtered_df = _restore_pair_dtypes(filtered_df)
         export_df, risk_levels = build_export_dataframe(filtered_df)
         summary = build_results_summary(filtered_df)
         output = build_warning_workbook(export_df, risk_levels, summary)
         filename = "筛选结果_警戒色.xlsx"
 
+    _touch_session(data_id)
     return send_file(
         output,
         as_attachment=True,

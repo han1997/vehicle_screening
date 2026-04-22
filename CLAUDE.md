@@ -11,11 +11,11 @@ Vehicle screening tool (车辆进出筛选工具) — a Flask web app that analy
 ```bash
 python app.py
 ```
-Runs on `localhost:5000` with Flask debug mode. No separate build/test/lint commands exist.
+Runs on `localhost:5000` with Flask debug mode. No automated test suite; manual testing by uploading an Excel file through the browser. No build/test/lint commands.
 
 ## Architecture
 
-Single-file Flask application (`app.py`, ~1670 lines) with Jinja2 templates in `templates/`. All CSS lives inline in `base.html` (no external stylesheets or static files).
+Single-file Flask application (`app.py`, ~1950 lines) with Jinja2 templates in `templates/`. All CSS lives inline in `base.html` (no external stylesheets or static files).
 
 ### Three-step workflow
 
@@ -34,7 +34,7 @@ Single-file Flask application (`app.py`, ~1670 lines) with Jinja2 templates in `
 - `parse_excel()` auto-detects columns by Chinese/English candidate names (车牌号/plate, 抓拍时间/time, 抓拍地点/location, 号牌种类/plate_type)
 - Raw columns preserved with `__source__` prefix for export
 - Checkpoint library persisted in `checkpoint_library.json`
-- Session data in in-memory `DATA_STORE` dict (keyed by UUID) — lost on restart
+- DataFrames persisted to **SQLite** files in `uploads/` (one `.db` per session) — `DATA_STORE` dict holds only lightweight metadata (db_path, last_access). Sessions expire after 2 hours (`SESSION_TTL_SECONDS`)
 - Pair-mode export: hand-built OOXML zip with risk-colored rows (no openpyxl for output)
 - Frequent-mode export: openpyxl with merged cells for vehicle-level summary columns
 
@@ -43,8 +43,9 @@ Single-file Flask application (`app.py`, ~1670 lines) with Jinja2 templates in `
 - `parse_excel()` → standardized DataFrame with plate/time/location/plate_type columns
 - `build_pair_filtered_dataframe()` → pair-mode filtering and scoring
 - `build_frequent_filtered_dataframe()` → frequent-mode filtering with time-of-day windows
-- `build_warning_workbook()` → generates styled xlsx for pair results
-- `build_plain_workbook()` → generates xlsx with cell merging for frequent results
+- `build_warning_workbook()` → generates styled xlsx for pair results (OOXML zip)
+- `build_frequent_warning_workbook()` → generates xlsx with cell merging for frequent results (openpyxl)
+- `_save_df()` / `_load_df()` → DataFrame ↔ SQLite persistence per session
 
 ### Template structure
 
@@ -60,7 +61,7 @@ Single-file Flask application (`app.py`, ~1670 lines) with Jinja2 templates in `
 
 ## Dependencies
 
-Flask, pandas, xlrd (for .xls), openpyxl (for .xlsx reading and frequent-mode export). Installed in `.venv/`.
+Flask, pandas, xlrd (for .xls), openpyxl (for .xlsx reading and frequent-mode export). Installed in `.venv/`. Python standard library `sqlite3` used for session data persistence.
 
 ## Language
 

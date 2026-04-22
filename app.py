@@ -24,6 +24,7 @@ DEFAULT_FREQUENT_OCCURRENCE = 2
 DEFAULT_FREQUENT_START_CLOCK = "00:00"
 DEFAULT_FREQUENT_END_CLOCK = "23:59"
 SOURCE_COLUMN_PREFIX = "__source__"
+PAGE_SIZE = 100
 
 # 简单的内存数据存储，适合本地单用户使用
 DATA_STORE = {}
@@ -607,6 +608,9 @@ def build_pair_display_results(filtered_df):
 
 def build_frequent_display_results(filtered_df, threshold, selected_export_columns):
     """构造频繁出现模式的前端展示数据。"""
+    # 过滤掉与内置列语义重复的导出列（仅影响展示，导出文件仍保留全量）
+    display_export_columns = [c for c in selected_export_columns if not _is_overlapping_column(c)]
+
     display_results = []
 
     for row in filtered_df.to_dict(orient="records"):
@@ -616,7 +620,7 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
         group_first = bool(row.get("group_first", False))
 
         detail_columns = []
-        for column in selected_export_columns:
+        for column in display_export_columns:
             detail_columns.append(
                 {
                     "name": column,
@@ -636,7 +640,6 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
                 "checkpoint_summary": normalize_text_value(row.get("checkpoint_summary", "")),
                 "event_time": format_datetime_string(row.get("event_time")),
                 "event_location": normalize_text_value(row.get("event_location", "")),
-                "event_plate_type": normalize_text_value(row.get("event_plate_type", "")),
                 "level": level,
                 "level_label": level_label,
                 "group_size": group_size,
@@ -646,6 +649,34 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
         )
 
     return display_results
+
+
+def paginate_results(results, page, filter_mode):
+    """对结果列表分页，频繁模式按车辆组边界切割避免断行。"""
+    if not results:
+        return [], 1, False, False
+
+    total = len(results)
+
+    if filter_mode == FILTER_MODE_PAIR:
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * PAGE_SIZE
+        end = min(start + PAGE_SIZE, total)
+        return results[start:end], total_pages, page > 1, page < total_pages
+
+    # 频繁模式：按车辆组边界分页
+    group_starts = [i for i, r in enumerate(results) if r.get("group_first")]
+    total_groups = len(group_starts)
+    if total_groups == 0:
+        return [], 1, False, False
+    total_pages = max(1, (total_groups + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start_group_idx = (page - 1) * PAGE_SIZE
+    end_group_idx = min(start_group_idx + PAGE_SIZE, total_groups)
+    start_row = group_starts[start_group_idx]
+    end_row = group_starts[end_group_idx] if end_group_idx < total_groups else total
+    return results[start_row:end_row], total_pages, page > 1, page < total_pages
 
 
 def build_export_dataframe(filtered_df):
@@ -973,18 +1004,20 @@ def build_warning_workbook(export_df, risk_levels, summary):
 
 
 def build_plain_workbook(export_df, sheet_name, merge_ranges=None):
-    """生成普通 xlsx 文件，可选合并单元格。"""
+    """生成普通 xlsx 文件，可选合并单元格。使用 xlsxwriter 引擎提升写入性能。"""
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         export_df.to_excel(writer, index=False, sheet_name=sheet_name)
         if merge_ranges:
-            worksheet = writer.book[sheet_name]
+            worksheet = writer.sheets[sheet_name]
             for start_row, end_row, column_idx in merge_ranges:
-                worksheet.merge_cells(
-                    start_row=int(start_row),
-                    end_row=int(end_row),
-                    start_column=int(column_idx),
-                    end_column=int(column_idx),
+                # merge_ranges 来自 openpyxl 的 1-based 索引，转为 xlsxwriter 的 0-based
+                r0 = int(start_row) - 1
+                r1 = int(end_row) - 1
+                c = int(column_idx) - 1
+                worksheet.merge_range(
+                    r0, c, r1, c,
+                    export_df.iloc[r0, c] if r0 < len(export_df) else "",
                 )
     output.seek(0)
     return output
@@ -1001,59 +1034,59 @@ def find_matching_column(df, candidates):
     return None
 
 
-def parse_excel(path):
+# 与频繁模式内置列语义重叠的候选词，用于过滤导出列中的重复项
+_OVERLAP_CANDIDATES = {
+    "plate": ["车牌号", "车牌号码", "车牌", "号牌号码", "plate", "plate_no", "license_plate"],
+    "time": ["抓拍时间", "通过时间", "时间", "通行时间", "capture_time", "time", "timestamp"],
+    "location": ["抓拍地点", "地点", "位置", "地点名称", "location", "site"],
+    "plate_type": ["号牌种类", "号牌类型", "车牌种类", "车牌类型", "plate_type", "plate_kind"],
+}
+
+
+def _is_overlapping_column(column_name):
+    """判断列名是否与频繁模式内置汇总/明细列语义重复。"""
+    col_lower = normalize_text_value(column_name).lower()
+    if not col_lower:
+        return False
+    for candidates in _OVERLAP_CANDIDATES.values():
+        for cand in candidates:
+            if normalize_text_value(cand).lower() == col_lower:
+                return True
+    return False
     """读取并标准化 Excel 数据，返回标准化数据和原始列名。"""
+    plate_candidates = [
+        "车牌号", "车牌号码", "车牌", "号牌号码",
+        "plate", "plate_no", "license_plate",
+    ]
+    time_candidates = [
+        "抓拍时间", "通过时间", "时间", "通行时间",
+        "capture_time", "time", "timestamp",
+    ]
+    location_candidates = [
+        "抓拍地点", "地点", "位置", "地点名称",
+        "location", "site",
+    ]
+    plate_type_candidates = [
+        "号牌种类", "号牌类型", "车牌种类", "车牌类型",
+        "plate_type", "plate_kind", "plate_category",
+    ]
+
+    # 第一步：只读表头，识别需要的列
     try:
-        df = pd.read_excel(path)
+        header_df = pd.read_excel(path, nrows=0)
     except Exception as exc:
         raise ValueError(f"无法读取Excel文件: {exc}")
 
-    if df.empty:
+    if header_df.empty and len(header_df.columns) == 0:
         raise ValueError("Excel 文件为空。")
 
-    df.columns = normalize_excel_headers(df.columns)
-    source_columns = df.columns.tolist()
+    normalized_headers = normalize_excel_headers(header_df.columns)
+    source_columns = list(normalized_headers)
 
-    plate_candidates = [
-        "车牌号",
-        "车牌号码",
-        "车牌",
-        "号牌号码",
-        "plate",
-        "plate_no",
-        "license_plate",
-    ]
-    time_candidates = [
-        "抓拍时间",
-        "通过时间",
-        "时间",
-        "通行时间",
-        "capture_time",
-        "time",
-        "timestamp",
-    ]
-    location_candidates = [
-        "抓拍地点",
-        "地点",
-        "位置",
-        "地点名称",
-        "location",
-        "site",
-    ]
-    plate_type_candidates = [
-        "号牌种类",
-        "号牌类型",
-        "车牌种类",
-        "车牌类型",
-        "plate_type",
-        "plate_kind",
-        "plate_category",
-    ]
-
-    plate_col = find_matching_column(df, plate_candidates)
-    time_col = find_matching_column(df, time_candidates)
-    location_col = find_matching_column(df, location_candidates)
-    plate_type_col = find_matching_column(df, plate_type_candidates)
+    plate_col = _find_matching_from_headers(header_df.columns, normalized_headers, plate_candidates)
+    time_col = _find_matching_from_headers(header_df.columns, normalized_headers, time_candidates)
+    location_col = _find_matching_from_headers(header_df.columns, normalized_headers, location_candidates)
+    plate_type_col = _find_matching_from_headers(header_df.columns, normalized_headers, plate_type_candidates)
 
     missing = []
     if plate_col is None:
@@ -1064,8 +1097,26 @@ def parse_excel(path):
         missing.append("抓拍地点列")
 
     if missing:
-        cols_str = ", ".join(str(c) for c in df.columns)
+        cols_str = ", ".join(str(c) for c in normalized_headers)
         raise ValueError(f"无法自动识别列: {', '.join(missing)}。当前表头为: {cols_str}")
+
+    # 第二步：读所有列，指定 dtype=str 避免逐列类型推断（主要性能优化点）
+    try:
+        df = pd.read_excel(path, dtype=str)
+    except Exception as exc:
+        raise ValueError(f"无法读取Excel文件: {exc}")
+
+    if df.empty:
+        raise ValueError("Excel 文件为空。")
+
+    # 用标准化列名替换原始列名
+    col_rename = {orig: norm for orig, norm in zip(header_df.columns, normalized_headers) if orig in df.columns}
+    df.rename(columns=col_rename, inplace=True)
+    plate_col = col_rename.get(plate_col, plate_col)
+    time_col = col_rename.get(time_col, time_col)
+    location_col = col_rename.get(location_col, location_col)
+    if plate_type_col is not None:
+        plate_type_col = col_rename.get(plate_type_col, plate_type_col)
 
     parsed_df = pd.DataFrame(
         {
@@ -1080,8 +1131,10 @@ def parse_excel(path):
     else:
         parsed_df["plate_type"] = ""
 
+    # 保留原始列副本，用于频繁模式导出
     for column in source_columns:
-        parsed_df[source_column_key(column)] = df[column]
+        if column in df.columns:
+            parsed_df[source_column_key(column)] = df[column]
 
     parsed_df["plate"] = parsed_df["plate"].map(normalize_text_value)
     parsed_df["location"] = parsed_df["location"].map(normalize_text_value)
@@ -1096,44 +1149,35 @@ def parse_excel(path):
     return parsed_df, source_columns
 
 
-def import_checkpoints_from_uploaded_files(filepaths, column_name):
-    """从本次上传的通行记录文件中按指定列导入卡口。"""
+def _find_matching_from_headers(original_columns, normalized_headers, candidates):
+    """在已标准化的表头中根据候选列表找到匹配的原始列名。"""
+    for cand in candidates:
+        cand_normalized = normalize_text_value(cand).lower()
+        for orig, norm in zip(original_columns, normalized_headers):
+            if normalize_text_value(norm).lower() == cand_normalized:
+                return orig
+    return None
+
+
+def import_checkpoints_from_dataframe(df, column_name, source_columns):
+    """从已解析的 DataFrame 中按指定列导入卡口（复用内存数据，避免重复读文件）。"""
     selected_column = str(column_name).strip()
     if not selected_column:
         raise ValueError("请选择要导入的卡口列。")
 
-    imported_values = []
-    matched_file_count = 0
+    source_key = source_column_key(selected_column)
+    if source_key not in df.columns:
+        if selected_column not in source_columns:
+            raise ValueError(f"所选列'{selected_column}'不在当前数据中。")
+        # 列名在 source_columns 中但未找到 __source__ 前缀，数据中无此列
+        raise ValueError(f"所选列'{selected_column}'不在当前数据中。")
 
-    for path in filepaths:
-        try:
-            header_df = pd.read_excel(path, nrows=0)
-        except Exception as exc:
-            raise ValueError(f"读取已上传文件失败: {exc}")
-
-        normalized_headers = normalize_excel_headers(header_df.columns)
-        try:
-            selected_index = normalized_headers.index(selected_column)
-        except ValueError:
-            continue
-        actual_column = header_df.columns[selected_index]
-
-        try:
-            value_df = pd.read_excel(path, dtype=str, usecols=[actual_column])
-        except Exception as exc:
-            raise ValueError(f"读取列“{selected_column}”失败: {exc}")
-
-        matched_file_count += 1
-        imported_values.extend(value_df[actual_column].tolist())
-
-    if matched_file_count == 0:
-        raise ValueError("所选列未出现在本次上传文件中，请重新选择。")
-
-    checkpoints = normalize_text_list(imported_values)
+    values = df[source_key].dropna().tolist()
+    checkpoints = normalize_text_list(values)
     if not checkpoints:
         raise ValueError("指定列中没有可导入的卡口名称。")
 
-    return checkpoints, matched_file_count
+    return checkpoints, 1
 
 
 @app.route("/", methods=["GET"])
@@ -1191,6 +1235,10 @@ def upload():
         return redirect(url_for("upload_form"))
 
     df = pd.concat(dfs, ignore_index=True)
+    # 对高频重复的字符串列做 category 编码，降低内存占用
+    for col in ("plate", "location", "plate_type"):
+        if col in df.columns:
+            df[col] = df[col].astype("category")
     locations = sorted(df["location"].dropna().unique().tolist())
     plate_type_series = df.get("plate_type", pd.Series(dtype=object))
     plate_type_values = [normalize_text_value(value) for value in plate_type_series.tolist()]
@@ -1241,14 +1289,15 @@ def import_checkpoint_from_uploaded(data_id):
         flash("请选择要导入的卡口列。")
         return redirect(url_for("review", data_id=data_id))
 
-    filepaths = data.get("uploaded_filepaths", [])
-    if not filepaths:
-        flash("未找到本次上传文件，请重新上传后再试。")
+    df = data.get("df")
+    source_columns = data.get("source_columns", [])
+    if df is None:
+        flash("未找到已解析数据，请重新上传后再试。")
         return redirect(url_for("upload_form"))
 
     try:
-        imported_checkpoints, matched_file_count = import_checkpoints_from_uploaded_files(
-            filepaths, column_name
+        imported_checkpoints, _ = import_checkpoints_from_dataframe(
+            df, column_name, source_columns
         )
     except ValueError as exc:
         flash(str(exc))
@@ -1260,7 +1309,7 @@ def import_checkpoint_from_uploaded(data_id):
 
     data["last_imported_checkpoint_column"] = column_name
     flash(
-        f"已从“{column_name}”导入卡口，匹配 {matched_file_count} 个文件，识别 {len(imported_checkpoints)} 个卡口，新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
+        f"已从'{column_name}'导入卡口，识别 {len(imported_checkpoints)} 个卡口，新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
     )
     return redirect(url_for("review", data_id=data_id))
 
@@ -1517,15 +1566,11 @@ def filter_results(data_id):
         DATA_STORE[data_id]["config"] = config
         DATA_STORE[data_id]["filtered"] = filtered_df
         DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_PAIR
+        DATA_STORE[data_id]["display_results"] = display_results
+        DATA_STORE[data_id]["summary"] = summary
+        DATA_STORE[data_id]["selected_export_columns"] = []
 
-        return render_template(
-            "results.html",
-            data_id=data_id,
-            filter_mode=FILTER_MODE_PAIR,
-            results=display_results,
-            summary=summary,
-            selected_export_columns=[],
-        )
+        return redirect(url_for("show_results", data_id=data_id))
 
     selected_checkpoints = normalize_choice_list(
         request.form.getlist("frequent_checkpoints"), checkpoint_library
@@ -1600,14 +1645,47 @@ def filter_results(data_id):
     DATA_STORE[data_id]["config"] = config
     DATA_STORE[data_id]["filtered"] = filtered_df
     DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_FREQUENT
+    DATA_STORE[data_id]["display_results"] = display_results
+    DATA_STORE[data_id]["summary"] = summary
+    DATA_STORE[data_id]["selected_export_columns"] = selected_export_columns
+
+    return redirect(url_for("show_results", data_id=data_id))
+
+
+@app.route("/results/<data_id>", methods=["GET"])
+def show_results(data_id):
+    """分页展示筛选结果。"""
+    data = DATA_STORE.get(data_id)
+    if not data:
+        flash("数据已过期或不存在，请重新上传文件。")
+        return redirect(url_for("upload_form"))
+
+    display_results = data.get("display_results")
+    if display_results is None:
+        flash("请先完成筛选。")
+        return redirect(url_for("review", data_id=data_id))
+
+    filter_mode = data.get("filtered_mode", FILTER_MODE_PAIR)
+    summary = data.get("summary", {})
+    selected_export_columns = data.get("selected_export_columns", [])
+
+    page = request.args.get("page", 1, type=int)
+    page_results, total_pages, has_prev, has_next = paginate_results(
+        display_results, page, filter_mode
+    )
 
     return render_template(
         "results.html",
         data_id=data_id,
-        filter_mode=FILTER_MODE_FREQUENT,
-        results=display_results,
+        filter_mode=filter_mode,
+        results=page_results,
         summary=summary,
         selected_export_columns=selected_export_columns,
+        page=page,
+        total_pages=total_pages,
+        has_prev=has_prev,
+        has_next=has_next,
+        total_results=len(display_results),
     )
 
 

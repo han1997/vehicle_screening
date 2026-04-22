@@ -71,9 +71,8 @@
               <th>频次级别</th>
               <th>本条抓拍时间</th>
               <th>本条抓拍地点</th>
-              <th>本条号牌种类</th>
-              {% for column in selected_export_columns %}
-                <th>{{ column }}</th>
+              {% for item in results[0].detail_columns %}
+                <th>{{ item.name }}</th>
               {% endfor %}
             </tr>
           </thead>
@@ -93,7 +92,6 @@
               {% endif %}
               <td>{{ row.event_time }}</td>
               <td>{{ row.event_location }}</td>
-              <td>{{ row.event_plate_type }}</td>
               {% for item in row.detail_columns %}
                 <td>{{ item.value }}</td>
               {% endfor %}
@@ -102,6 +100,22 @@
           </tbody>
         </table>
       </div>
+
+      {% if total_pages > 1 %}
+      <div class="pagination">
+        <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页，共 {{ total_results }} 条</span>
+        <div class="pagination-buttons">
+          {% if has_prev %}
+            <a href="{{ url_for('show_results', data_id=data_id, page=1) }}" class="btn btn-ghost btn-sm">首页</a>
+            <a href="{{ url_for('show_results', data_id=data_id, page=page-1) }}" class="btn btn-ghost btn-sm">上一页</a>
+          {% endif %}
+          {% if has_next %}
+            <a href="{{ url_for('show_results', data_id=data_id, page=page+1) }}" class="btn btn-ghost btn-sm">下一页</a>
+            <a href="{{ url_for('show_results', data_id=data_id, page=total_pages) }}" class="btn btn-ghost btn-sm">末页</a>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
 
       <div class="form-row fixed-actions">
         <div class="fixed-actions-left">
@@ -122,7 +136,7 @@
   {% else %}
     <h2>筛选结果概览</h2>
     {% if results %}
-      <p class="subtext">共找到 <strong>{{ results|length }}</strong> 条满足条件的通行记录对。评分越高，越接近您设定的目标过车间隔；高风险结果会以警戒色突出显示。</p>
+      <p class="subtext">共找到 <strong>{{ total_results }}</strong> 条满足条件的通行记录对。评分越高，越接近您设定的目标过车间隔；高风险结果会以警戒色突出显示。</p>
 
       <div class="summary-grid">
         <div class="summary-card summary-card-danger">
@@ -191,6 +205,22 @@
           </tbody>
         </table>
       </div>
+
+      {% if total_pages > 1 %}
+      <div class="pagination">
+        <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页，共 {{ total_results }} 条</span>
+        <div class="pagination-buttons">
+          {% if has_prev %}
+            <a href="{{ url_for('show_results', data_id=data_id, page=1) }}" class="btn btn-ghost btn-sm">首页</a>
+            <a href="{{ url_for('show_results', data_id=data_id, page=page-1) }}" class="btn btn-ghost btn-sm">上一页</a>
+          {% endif %}
+          {% if has_next %}
+            <a href="{{ url_for('show_results', data_id=data_id, page=page+1) }}" class="btn btn-ghost btn-sm">下一页</a>
+            <a href="{{ url_for('show_results', data_id=data_id, page=total_pages) }}" class="btn btn-ghost btn-sm">末页</a>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
 
       <div class="form-row fixed-actions">
         <div class="fixed-actions-left">

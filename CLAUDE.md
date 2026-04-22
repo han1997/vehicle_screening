@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Vehicle screening tool (车辆进出筛选工具) — a Flask web app that analyzes vehicle traffic records to find entry-exit pairs matching a target time interval. Used locally by traffic enforcement personnel.
+Vehicle screening tool (车辆进出筛选工具) — a Flask web app that analyzes vehicle traffic records from Excel files. Finds entry-exit pairs matching a target time interval, or identifies frequently appearing vehicles. Used locally by traffic enforcement personnel.
 
 ## Running
 
@@ -15,33 +15,53 @@ Runs on `localhost:5000` with Flask debug mode. No separate build/test/lint comm
 
 ## Architecture
 
-Single-file Flask application (`app.py`) with Jinja2 templates in `templates/`.
+Single-file Flask application (`app.py`, ~1670 lines) with Jinja2 templates in `templates/`. All CSS lives inline in `base.html` (no external stylesheets or static files).
 
 ### Three-step workflow
 
-1. **Upload** (`/` → `upload.html`) — Import checkpoint library from Excel; upload traffic record Excel files
-2. **Configure** (`/review/<data_id>` → `review.html`) — Select entry/exit checkpoints from local library, set time window and target interval
-3. **Results** (`/filter/<data_id>` → `results.html`) — View scored entry-exit pairs; download color-coded Excel
+1. **Upload** (`/` → `upload.html`) — Import checkpoint library from Excel; upload traffic record Excel files (multi-file supported)
+2. **Configure** (`/review/<data_id>` → `review.html`) — Select checkpoints, filter mode, time window, and parameters
+3. **Results** (`/filter/<data_id>` → `results.html`) — View scored results; download color-coded Excel
+
+### Two filter modes
+
+- **Pair mode** (`pair`) — Find entry-exit checkpoint pairs per vehicle within a time window. Scores by closeness to target interval: `score = round(max(0, (1 - |delta - target| / target)) * 100)`. Risk: red ≥70, yellow ≥40, blue <40.
+- **Frequent mode** (`frequent`) — Find vehicles appearing ≥N times at selected checkpoints within a daily time window (supports cross-midnight ranges like 20:00-04:00). Levels: high-frequency (≥threshold+3), attention (≥threshold+1), baseline.
 
 ### Key data flow
 
-- Excel files uploaded to `uploads/` directory (UUID filenames)
-- Parsed via `parse_excel()` which auto-detects columns by Chinese/English candidate names (车牌号/plate, 抓拍时间/time, 抓拍地点/location, 号牌种类/plate_type)
+- Excel files uploaded to `uploads/` (UUID filenames, gitignored)
+- `parse_excel()` auto-detects columns by Chinese/English candidate names (车牌号/plate, 抓拍时间/time, 抓拍地点/location, 号牌种类/plate_type)
+- Raw columns preserved with `__source__` prefix for export
 - Checkpoint library persisted in `checkpoint_library.json`
-- Session data stored in-memory `DATA_STORE` dict (keyed by UUID) — lost on restart
-- Filtering pairs entry and exit events per vehicle, scoring by closeness to target interval: `score = max(0, (1 - |delta - target| / target)) * 100`
-- Risk levels: red (≥70), yellow (≥40), blue (<40)
-- Excel export built manually as OOXML zip (no openpyxl dependency for output)
+- Session data in in-memory `DATA_STORE` dict (keyed by UUID) — lost on restart
+- Pair-mode export: hand-built OOXML zip with risk-colored rows (no openpyxl for output)
+- Frequent-mode export: openpyxl with merged cells for vehicle-level summary columns
+
+### Key helper functions
+
+- `parse_excel()` → standardized DataFrame with plate/time/location/plate_type columns
+- `build_pair_filtered_dataframe()` → pair-mode filtering and scoring
+- `build_frequent_filtered_dataframe()` → frequent-mode filtering with time-of-day windows
+- `build_warning_workbook()` → generates styled xlsx for pair results
+- `build_plain_workbook()` → generates xlsx with cell merging for frequent results
 
 ### Template structure
 
-- `base.html` — Layout with full CSS (all styles inline), navbar, flash messages
-- `upload.html`, `review.html`, `results.html` — Extend base; review.html includes client-side checkpoint search JS
+- `base.html` — Full layout with ~1050 lines of inline CSS, navbar, flash messages
+- `upload.html`, `review.html`, `results.html` — Extend base; review.html includes client-side checkpoint search/filter JS
+
+### Data cleaning rules (in `parse_excel`)
+
+- Rows with unparseable time values are dropped
+- Empty plate/location rows dropped
+- Plates matching "无牌车" or "未识别" are excluded
+- All text values trimmed; nan/none/nat normalized to empty
 
 ## Dependencies
 
-Flask, pandas, xlrd (for .xls), openpyxl (for .xlsx reading). Installed in `.venv/`.
+Flask, pandas, xlrd (for .xls), openpyxl (for .xlsx reading and frequent-mode export). Installed in `.venv/`.
 
 ## Language
 
-All UI text and comments are in Chinese. Maintain Chinese for user-facing strings.
+All UI text and comments are in Chinese. Maintain Chinese for user-facing strings and code comments.

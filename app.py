@@ -21,6 +21,7 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 ALLOWED_EXTENSIONS = {"xls", "xlsx"}
 CHECKPOINT_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "checkpoint_library.json")
 KEYPERSON_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "keyperson_library.json")
+SESSION_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "uploads", "session_history.json")
 FILTER_MODE_PAIR = "pair"
 FILTER_MODE_FREQUENT = "frequent"
 FILTER_MODE_KEYPERSON = "keyperson"
@@ -100,6 +101,136 @@ def _touch_session(data_id):
     """更新会话最后访问时间。"""
     if data_id in DATA_STORE:
         DATA_STORE[data_id]["last_access"] = time.time()
+
+
+def _save_metadata(data_id):
+    """将会话元数据持久化到 SQLite 的 _metadata 表。"""
+    data = DATA_STORE.get(data_id)
+    if not data:
+        return
+    metadata = {
+        "data_id": data_id,
+        "locations": json.dumps(data.get("locations", []), ensure_ascii=False),
+        "plate_types": json.dumps(data.get("plate_types", []), ensure_ascii=False),
+        "source_columns": json.dumps(data.get("source_columns", []), ensure_ascii=False),
+        "config": json.dumps(data.get("config", {}), ensure_ascii=False),
+        "filtered_mode": data.get("filtered_mode") or "",
+        "summary": json.dumps(data.get("summary"), ensure_ascii=False),
+        "selected_export_columns": json.dumps(data.get("selected_export_columns", []), ensure_ascii=False),
+        "last_imported_checkpoint_column": data.get("last_imported_checkpoint_column", ""),
+        "default_max_minutes": str(data.get("default_max_minutes", 30.0)),
+        "default_start_time": data.get("default_start_time", ""),
+        "default_end_time": data.get("default_end_time", ""),
+        "created_at": data.get("created_at", ""),
+        "last_access": str(data.get("last_access", 0)),
+    }
+    conn = sqlite3.connect(_db_path(data_id))
+    try:
+        conn.execute("DROP TABLE IF EXISTS _metadata")
+        conn.execute("CREATE TABLE _metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany(
+            "INSERT INTO _metadata (key, value) VALUES (?, ?)",
+            list(metadata.items()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _restore_session(data_id):
+    """从磁盘恢复会话。返回 True 表示恢复成功。"""
+    db_file = _db_path(data_id)
+    if not os.path.exists(db_file):
+        return False
+    try:
+        conn = sqlite3.connect(db_file)
+        try:
+            rows = conn.execute("SELECT key, value FROM _metadata").fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    if not rows:
+        return False
+    raw = dict(rows)
+    last_access = float(raw.get("last_access", 0))
+    if time.time() - last_access > SESSION_TTL_SECONDS:
+        try:
+            os.remove(db_file)
+        except OSError:
+            pass
+        return False
+    DATA_STORE[data_id] = {
+        "db_path": db_file,
+        "locations": json.loads(raw.get("locations", "[]")),
+        "plate_types": json.loads(raw.get("plate_types", "[]")),
+        "source_columns": json.loads(raw.get("source_columns", "[]")),
+        "config": json.loads(raw.get("config", "{}")),
+        "filtered_mode": raw.get("filtered_mode") or None,
+        "summary": json.loads(raw.get("summary", "null")),
+        "selected_export_columns": json.loads(raw.get("selected_export_columns", "[]")),
+        "last_imported_checkpoint_column": raw.get("last_imported_checkpoint_column", ""),
+        "default_max_minutes": float(raw.get("default_max_minutes", 30)),
+        "default_start_time": raw.get("default_start_time", ""),
+        "default_end_time": raw.get("default_end_time", ""),
+        "created_at": raw.get("created_at", ""),
+        "last_access": last_access,
+    }
+    return True
+
+
+def _get_or_restore_session(data_id):
+    """获取会话，若内存中不存在则尝试从磁盘恢复。"""
+    data = DATA_STORE.get(data_id)
+    if data:
+        return data
+    if _restore_session(data_id):
+        return DATA_STORE.get(data_id)
+    return None
+
+
+def _load_session_history():
+    """加载会话历史记录。"""
+    if not os.path.exists(SESSION_HISTORY_FILE):
+        return []
+    try:
+        with open(SESSION_HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_session_history(history):
+    """保存会话历史记录。"""
+    with open(SESSION_HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def _add_to_session_history(data_id, filenames, record_count):
+    """添加或更新一条历史记录。"""
+    history = _load_session_history()
+    history = [e for e in history if e.get("data_id") != data_id]
+    history.insert(0, {
+        "data_id": data_id,
+        "filenames": filenames,
+        "record_count": record_count,
+        "upload_time": datetime.now().isoformat(timespec="seconds"),
+        "last_access_time": time.time(),
+        "filter_mode": None,
+    })
+    history = history[:50]
+    _save_session_history(history)
+
+
+def _update_history_filter_mode(data_id, filter_mode):
+    """更新历史记录中的筛选模式。"""
+    history = _load_session_history()
+    for entry in history:
+        if entry.get("data_id") == data_id:
+            entry["filter_mode"] = filter_mode
+            entry["last_access_time"] = time.time()
+            break
+    _save_session_history(history)
 
 RISK_LEVEL_META = {
     "red": {"label": "高风险", "style": 4},
@@ -1866,6 +1997,17 @@ def _cleanup_sessions():
             except OSError:
                 pass
 
+    if expired:
+        expired_set = set(expired)
+        history = _load_session_history()
+        updated_history = [
+            entry for entry in history
+            if entry.get("data_id") not in expired_set
+            and now - entry.get("last_access_time", 0) <= SESSION_TTL_SECONDS
+        ]
+        if len(updated_history) != len(history):
+            _save_session_history(updated_history)
+
 
 @app.route("/", methods=["GET"])
 def upload_form():
@@ -1876,6 +2018,7 @@ def upload_form():
         "upload.html",
         checkpoint_library=checkpoint_library,
         matched_home_checkpoints=matched_home_checkpoints,
+        session_history=_load_session_history(),
     )
 
 
@@ -1895,17 +2038,29 @@ def upload():
     dfs = []
     source_columns = []
     source_column_set = set()
+    temp_filepaths = []
 
     for file in files:
         if not allowed_file(file.filename):
+            for fp in temp_filepaths:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
             flash(f"文件 {file.filename} 不是支持的 Excel 格式。")
             return redirect(url_for("upload_form"))
 
         filepath = save_uploaded_excel(file)
+        temp_filepaths.append(filepath)
 
         try:
             df_part, file_columns = parse_excel(filepath)
         except ValueError as exc:
+            for fp in temp_filepaths:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
             flash(f"文件 {file.filename} 解析失败: {exc}")
             return redirect(url_for("upload_form"))
 
@@ -1932,8 +2087,17 @@ def upload():
 
     # DataFrame 持久化到 SQLite，不在内存中保留
     _save_df(df, data_id, "raw_data")
+    record_count = len(df)
+    filenames_list = [f.filename for f in files]
     del df
     del dfs
+
+    # 删除临时 Excel 文件
+    for fp in temp_filepaths:
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
 
     DATA_STORE[data_id] = {
         "db_path": _db_path(data_id),
@@ -1957,8 +2121,12 @@ def upload():
             "end_time": default_end_time,
             "target_minutes": default_max_minutes,
         },
+        "created_at": datetime.now().isoformat(timespec="seconds"),
         "last_access": time.time(),
     }
+
+    _save_metadata(data_id)
+    _add_to_session_history(data_id, filenames_list, record_count)
 
     return redirect(url_for("review", data_id=data_id))
 
@@ -1966,7 +2134,7 @@ def upload():
 @app.route("/checkpoint/import/uploaded/<data_id>", methods=["POST"])
 def import_checkpoint_from_uploaded(data_id):
     """从本次已上传通行记录中，按选择列导入卡口库。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -1997,6 +2165,7 @@ def import_checkpoint_from_uploaded(data_id):
 
     data["last_imported_checkpoint_column"] = column_name
     _touch_session(data_id)
+    _save_metadata(data_id)
     flash(
         f"已从'{column_name}'导入卡口，识别 {len(imported_checkpoints)} 个卡口，新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
     )
@@ -2006,7 +2175,7 @@ def import_checkpoint_from_uploaded(data_id):
 @app.route("/checkpoint/delete/<data_id>", methods=["POST"])
 def delete_checkpoints_from_library(data_id):
     """从本地卡口库删除选中的卡口。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -2030,6 +2199,7 @@ def delete_checkpoints_from_library(data_id):
     data["config"] = prune_removed_checkpoints_from_config(config, selected_checkpoints)
 
     _touch_session(data_id)
+    _save_metadata(data_id)
     flash(
         f"已删除 {len(selected_checkpoints)} 个卡口，本地卡口库剩余 {len(updated_library)} 个。"
     )
@@ -2079,7 +2249,7 @@ def upload_keyperson():
 @app.route("/keyperson/import/<data_id>", methods=["POST"])
 def import_keyperson_from_excel(data_id):
     """从配置页上传重点人 Excel 导入本地重点人库。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -2126,7 +2296,7 @@ def import_keyperson_from_excel(data_id):
 @app.route("/keyperson/delete/<data_id>", methods=["POST"])
 def delete_keypersons_from_library(data_id):
     """从本地重点人库中删除选中条目。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -2147,6 +2317,7 @@ def delete_keypersons_from_library(data_id):
     data["config"] = config
 
     _touch_session(data_id)
+    _save_metadata(data_id)
     flash(f"已删除 {len(selected_plates)} 名重点人，本地重点人库剩余 {len(updated)} 名。")
     return redirect(url_for("review", data_id=data_id))
 
@@ -2154,7 +2325,7 @@ def delete_keypersons_from_library(data_id):
 @app.route("/review/<data_id>", methods=["GET"])
 def review(data_id):
     """展示卡口库与筛选条件配置页面。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -2317,7 +2488,7 @@ def review(data_id):
 @app.route("/filter/<data_id>", methods=["POST"])
 def filter_results(data_id):
     """根据选择的筛选模式执行过滤。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -2414,6 +2585,8 @@ def filter_results(data_id):
         DATA_STORE[data_id]["summary"] = summary
         DATA_STORE[data_id]["selected_export_columns"] = []
         DATA_STORE[data_id]["last_access"] = time.time()
+        _save_metadata(data_id)
+        _update_history_filter_mode(data_id, FILTER_MODE_PAIR)
 
         return redirect(url_for("show_results", data_id=data_id))
 
@@ -2501,6 +2674,8 @@ def filter_results(data_id):
         DATA_STORE[data_id]["summary"] = summary
         DATA_STORE[data_id]["selected_export_columns"] = selected_export_columns
         DATA_STORE[data_id]["last_access"] = time.time()
+        _save_metadata(data_id)
+        _update_history_filter_mode(data_id, FILTER_MODE_KEYPERSON)
 
         return redirect(url_for("show_results", data_id=data_id))
 
@@ -2577,6 +2752,8 @@ def filter_results(data_id):
     DATA_STORE[data_id]["summary"] = summary
     DATA_STORE[data_id]["selected_export_columns"] = selected_export_columns
     DATA_STORE[data_id]["last_access"] = time.time()
+    _save_metadata(data_id)
+    _update_history_filter_mode(data_id, FILTER_MODE_FREQUENT)
 
     return redirect(url_for("show_results", data_id=data_id))
 
@@ -2584,7 +2761,7 @@ def filter_results(data_id):
 @app.route("/results/<data_id>", methods=["GET"])
 def show_results(data_id):
     """分页展示筛选结果。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -2642,7 +2819,7 @@ def show_results(data_id):
 @app.route("/download/<data_id>", methods=["GET"])
 def download(data_id):
     """下载筛选结果。"""
-    data = DATA_STORE.get(data_id)
+    data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
         return redirect(url_for("upload_form"))
@@ -2722,5 +2899,29 @@ def download(data_id):
     )
 
 
+def _restore_sessions_on_startup():
+    """启动时清理孤儿 Excel 文件并恢复未过期的会话。"""
+    upload_dir = app.config["UPLOAD_FOLDER"]
+    if not os.path.isdir(upload_dir):
+        return
+
+    # 清理残留的 Excel 文件
+    for filename in os.listdir(upload_dir):
+        filepath = os.path.join(upload_dir, filename)
+        if filename.endswith((".xls", ".xlsx")):
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+
+    # 从 .db 文件恢复未过期的会话
+    for filename in os.listdir(upload_dir):
+        if not filename.endswith(".db"):
+            continue
+        data_id = filename[:-3]
+        _restore_session(data_id)
+
+
 if __name__ == "__main__":
+    _restore_sessions_on_startup()
     app.run(debug=True)

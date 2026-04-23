@@ -358,45 +358,45 @@
         {% endif %}
       </section>
 
-      <div class=”section-grid” style=”grid-template-columns: minmax(0, 1fr) minmax(0, 2.2fr);”>
-        <section class=”section-card”>
-          <div class=”section-title”>出现次数阈值</div>
-          <div class=”section-hint”>默认值 2，表示同一车辆在所选卡口中的出现次数达到该阈值才会被筛出。</div>
-          <label for=”min_occurrence”>最小出现次数：</label>
-          <input type=”number” name=”min_occurrence” id=”min_occurrence”
-                 value=”{{ min_occurrence_value }}” min=”1” step=”1”>
+      <div class="section-grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 2.2fr);">
+        <section class="section-card">
+          <div class="section-title">出现次数阈值</div>
+          <div class="section-hint">默认值 2，表示同一车辆在所选卡口中的出现次数达到该阈值才会被筛出。</div>
+          <label for="min_occurrence">最小出现次数：</label>
+          <input type="number" name="min_occurrence" id="min_occurrence"
+                 value="{{ min_occurrence_value }}" min="1" step="1">
         </section>
 
-        <section class=”section-card”>
-          <div class=”section-title section-title-inline”>
+        <section class="section-card">
+          <div class="section-title section-title-inline">
             <span>导出列选择（原文件）</span>
-            <span class=”selection-tag multi”>多选</span>
+            <span class="selection-tag multi">多选</span>
           </div>
-          <div class=”section-hint”>导出会保留下列勾选项，并额外附加”出现次数”等聚合字段。表格展示也会同步这些合并列。</div>
+          <div class="section-hint">导出会保留下列勾选项，并额外附加"出现次数"等聚合字段。表格展示也会同步这些合并列。</div>
           {% if source_columns %}
-            <div class=”search-stack”>
-              <input type=”search” placeholder=”搜索列名，如：车牌、时间、地点” data-frequent-export-search>
-              <div class=”search-meta”>
+            <div class="search-stack">
+              <input type="search" placeholder="搜索列名，如：车牌、时间、地点" data-frequent-export-search>
+              <div class="search-meta">
                 <span data-export-column-status>正在加载...</span>
                 <span>可多选，已勾选 {{ selected_export_columns|length }} 列</span>
               </div>
             </div>
-            <div class=”select-all-bar”>
-              <button type=”button” class=”btn btn-ghost btn-small” data-select-all=”export_columns”>全选</button>
-              <button type=”button” class=”btn btn-ghost btn-small” data-deselect-all=”export_columns”>取消全选</button>
+            <div class="select-all-bar">
+              <button type="button" class="btn btn-ghost btn-small" data-select-all="export_columns">全选</button>
+              <button type="button" class="btn btn-ghost btn-small" data-deselect-all="export_columns">取消全选</button>
             </div>
-            <div class=”checklist-panel checklist-panel-large”>
-              <div class=”checklist-grid”>
+            <div class="checklist-panel checklist-panel-large">
+              <div class="checklist-grid">
                 {% for column in source_columns %}
-                <label class=”check-item” data-frequent-export-item data-search=”{{ column|lower }}”>
-                  <input type=”checkbox” name=”export_columns” value=”{{ column }}” {% if column in selected_export_columns %}checked{% endif %}>
+                <label class="check-item" data-frequent-export-item data-search="{{ column|lower }}">
+                  <input type="checkbox" name="export_columns" value="{{ column }}" {% if column in selected_export_columns %}checked{% endif %}>
                   <span>{{ column }}</span>
                 </label>
                 {% endfor %}
               </div>
             </div>
           {% else %}
-            <div class=”empty-note”>
+            <div class="empty-note">
               <strong>当前没有可选导出列</strong>
               <p>请返回首页重新上传带表头的 Excel 文件。</p>
             </div>

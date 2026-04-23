@@ -15,7 +15,7 @@ Runs on `localhost:5000` with Flask debug mode. No automated test suite; manual 
 
 ## Architecture
 
-Single-file Flask application (`app.py`, ~1950 lines) with Jinja2 templates in `templates/`. All CSS lives inline in `base.html` (no external stylesheets or static files).
+Single-file Flask application (`app.py`, ~1950 lines) with Jinja2 templates in `templates/`. All CSS lives inline in `base.html` (~1100 lines, no external stylesheets or static files).
 
 ### Three-step workflow
 
@@ -49,7 +49,7 @@ Single-file Flask application (`app.py`, ~1950 lines) with Jinja2 templates in `
 
 ### Template structure
 
-- `base.html` — Full layout with ~1050 lines of inline CSS, navbar, flash messages
+- `base.html` — Full layout with ~1100 lines of inline CSS, navbar, flash messages
 - `upload.html`, `review.html`, `results.html` — Extend base; review.html includes client-side checkpoint search/filter JS
 
 ### Data cleaning rules (in `parse_excel`)

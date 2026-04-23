@@ -133,6 +133,142 @@
         <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">重新上传文件</a>
       </div>
     {% endif %}
+  {% elif filter_mode == "keyperson" %}
+    <h2>重点人车辆筛选结果</h2>
+    {% if results %}
+      <p class="subtext">共识别 <strong>{{ summary.total_persons }}</strong> 名达到出现阈值的重点人，覆盖原始记录 <strong>{{ summary.matched_records }}</strong> 条。</p>
+
+      <div class="summary-grid">
+        <div class="summary-card summary-card-danger">
+          <div class="summary-label">最高评分</div>
+          <div class="summary-value">{{ summary.max_score }}</div>
+          <div class="summary-note">综合评分（频率 + 时间）</div>
+        </div>
+        <div class="summary-card summary-card-warning">
+          <div class="summary-label">匹配重点人</div>
+          <div class="summary-value">{{ summary.total_persons }}</div>
+          <div class="summary-note">出现次数达到阈值的重点人数</div>
+        </div>
+        <div class="summary-card summary-card-safe">
+          <div class="summary-label">夜间活跃</div>
+          <div class="summary-value">{{ summary.persons_with_nighttime }}</div>
+          <div class="summary-note">存在夜间（22:00-06:00）出现的重点人数</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">关键指标</div>
+          <div class="summary-value">{{ summary.matched_records }} 条</div>
+          <div class="summary-note">平均出现 {{ "%.1f"|format(summary.avg_occurrence) }} 次</div>
+        </div>
+      </div>
+
+      {% if selected_export_columns %}
+        <section class="section-card" style="margin-bottom: 12px;">
+          <div class="section-title">明细输出列（导出同样生效）</div>
+          <div class="pill-cloud">
+            {% for column in selected_export_columns %}
+              <span class="pill">{{ column }}</span>
+            {% endfor %}
+          </div>
+        </section>
+      {% endif %}
+
+      <div class="results-toolbar" style="margin-bottom: 12px;">
+        <div class="legend">
+          <span>风险标记：</span>
+          <span class="legend-dot red"></span><span>高风险：综合评分 ≥ 70</span>
+          <span class="legend-dot yellow"></span><span>中风险：40-69</span>
+          <span class="legend-dot blue"></span><span>低风险：&lt; 40</span>
+        </div>
+        <div class="toolbar-note">
+          评分规则：频率得分（0-60）+ 时段得分（0-40），夜间（22:00-06:00）占比越高分数越高。
+        </div>
+      </div>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>车牌号</th>
+              <th>姓名</th>
+              <th>出现次数</th>
+              <th>夜间占比</th>
+              <th>频率分</th>
+              <th>时间分</th>
+              <th>综合评分</th>
+              <th>首次时间</th>
+              <th>最后时间</th>
+              <th>覆盖时长</th>
+              <th>卡口数</th>
+              <th>卡口分布</th>
+              <th>风险等级</th>
+              <th>本条抓拍时间</th>
+              <th>本条卡口</th>
+              {% for item in results[0].detail_columns %}
+                <th>{{ item.name }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in results %}
+            <tr class="score-{{ row.level }}">
+              {% if row.group_first %}
+                <td rowspan="{{ row.group_size }}">{{ row.plate }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.person_name }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.occurrence_count }}</td>
+                <td rowspan="{{ row.group_size }}">{{ "%.0f%%"|format(row.nighttime_ratio * 100) }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.frequency_score }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.time_score }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.total_score }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.first_time }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.last_time }}</td>
+                <td rowspan="{{ row.group_size }}">{{ "%.2f"|format(row.duration_minutes) }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_count }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_summary }}</td>
+                <td rowspan="{{ row.group_size }}"><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
+              {% endif %}
+              <td>{{ row.event_time }}</td>
+              <td>{{ row.event_location }}</td>
+              {% for item in row.detail_columns %}
+                <td>{{ item.value }}</td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% if total_pages > 1 %}
+      <div class="pagination">
+        <span class="pagination-info">第 {{ page }} / {{ total_pages }} 页，共 {{ total_results }} 条</span>
+        <div class="pagination-buttons">
+          {% if has_prev %}
+            <a href="{{ url_for('show_results', data_id=data_id, page=1) }}" class="btn btn-ghost btn-sm">首页</a>
+            <a href="{{ url_for('show_results', data_id=data_id, page=page-1) }}" class="btn btn-ghost btn-sm">上一页</a>
+          {% endif %}
+          {% if has_next %}
+            <a href="{{ url_for('show_results', data_id=data_id, page=page+1) }}" class="btn btn-ghost btn-sm">下一页</a>
+            <a href="{{ url_for('show_results', data_id=data_id, page=total_pages) }}" class="btn btn-ghost btn-sm">末页</a>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="form-row fixed-actions">
+        <div class="fixed-actions-left">
+          <a href="{{ url_for('download', data_id=data_id) }}" class="btn">下载重点人筛选结果 Excel</a>
+          <a href="{{ url_for('review', data_id=data_id) }}" class="btn btn-ghost">调整筛选条件</a>
+        </div>
+        <div class="fixed-actions-right">
+          <a href="{{ url_for('upload_form') }}" class="btn btn-secondary">重新上传新数据</a>
+        </div>
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <p>当前没有达到出现次数阈值的重点人，请尝试扩大时段、增加卡口或降低阈值。</p>
+        <a href="{{ url_for('review', data_id=data_id) }}" class="btn">返回修改筛选条件</a>
+        <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">重新上传文件</a>
+      </div>
+    {% endif %}
   {% else %}
     <h2>筛选结果概览</h2>
     {% if results %}

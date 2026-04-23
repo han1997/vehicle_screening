@@ -5,7 +5,7 @@
 {% block content %}
   <div class="step-badge">步骤 2 / 3 · 配置筛选</div>
   <h2>选择筛选模式并设置参数</h2>
-  <p class="subtext">支持两种模式：配对模式按日期时间范围筛选，频繁模式按日内时段（24 小时制）筛选，可设置跨天时段如 20:00-04:00。</p>
+  <p class="subtext">支持三种模式：配对模式按日期时间范围筛选，频繁模式按日内时段筛选，重点人模式匹配已知重点人车辆并综合评分。</p>
 
   <div class="summary-grid">
     <div class="summary-card">
@@ -25,12 +25,18 @@
     </div>
     <div class="summary-card">
       <div class="summary-label">当前模式</div>
-      <div class="summary-value">{{ "配对" if filter_mode == "pair" else "频繁" }}</div>
+      <div class="summary-value">
+        {% if filter_mode == "pair" %}配对
+        {% elif filter_mode == "frequent" %}频繁
+        {% else %}重点人{% endif %}
+      </div>
       <div class="summary-note">
         {% if filter_mode == "pair" %}
           第一/第二卡口配对分析
-        {% else %}
+        {% elif filter_mode == "frequent" %}
           多卡口出现次数分析（已选 {{ selected_frequent_checkpoints|length }} 个）
+        {% else %}
+          重点人车辆通行风险分析（已选 {{ selected_keypersons|length }} 人）
         {% endif %}
       </div>
     </div>
@@ -112,16 +118,55 @@
   </section>
   {% endif %}
 
+  <div data-mode-block="keyperson" style="display:none;">
+    <section class="section-card">
+      <div class="section-title">重点人库管理</div>
+      <div class="section-hint">上传包含姓名、身份证、手机、车牌号的 Excel 文件，导入后可在此管理。</div>
+      <form action="{{ url_for('import_keyperson_from_excel', data_id=data_id) }}" method="post" enctype="multipart/form-data" class="helper-inline">
+        <input type="file" name="keyperson_file" accept=".xls,.xlsx" required class="file-input-native">
+        <button type="button" class="file-trigger" data-keyperson-file-trigger>选择重点人 Excel</button>
+        <button type="submit" class="btn btn-ghost btn-small">导入重点人库</button>
+      </form>
+      {% if keyperson_library %}
+        <form action="{{ url_for('delete_keypersons_from_library', data_id=data_id) }}" method="post" style="margin-top: 14px;">
+          <div class="select-all-bar">
+            <button type="button" class="btn btn-ghost btn-small" data-select-all="delete_keypersons">全选</button>
+            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="delete_keypersons">取消全选</button>
+          </div>
+          <div class="checklist-panel">
+            <div class="checklist-grid">
+              {% for person in keyperson_library %}
+              <label class="check-item">
+                <input type="checkbox" name="delete_keypersons" value="{{ person.plate }}">
+                <span>{{ person.name or '未命名' }}（{{ person.plate }}）</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="action-strip" style="margin-top: 8px;">
+            <button type="submit" class="btn btn-ghost">删除选中重点人</button>
+            <div class="toolbar-note">删除操作仅影响本地重点人库，不会改动通行数据。</div>
+          </div>
+        </form>
+      {% else %}
+        <div class="empty-note" style="margin-top: 12px;">
+          <strong>本地重点人库为空</strong>
+          <p>请先上传重点人 Excel 文件导入数据。</p>
+        </div>
+      {% endif %}
+    </section>
+  </div>
+
   <form action="{{ url_for('filter_results', data_id=data_id) }}" method="post" id="filter-form">
     <section class="section-card">
       <div class="section-title section-title-inline">
         <span>筛选模式</span>
         <span class="selection-tag">单选</span>
       </div>
-      <div class="section-hint">可随时切换。系统会记住你上次在两种模式下填写的参数。</div>
-      <div class="choice-row">
+      <div class="section-hint">可随时切换。系统会记住你上次在各模式下填写的参数。</div>
+      <div class="choice-row choice-row-3">
         <label class="choice-card">
-          <input type="radio" name="filter_mode" value="pair" {% if filter_mode != "frequent" %}checked{% endif %}>
+          <input type="radio" name="filter_mode" value="pair" {% if filter_mode == "pair" %}checked{% endif %}>
           <span>
             <strong>卡口配对模式</strong>
             <span>选择第一卡口和第二卡口，筛选符合时间顺序的车辆配对记录。</span>
@@ -132,6 +177,13 @@
           <span>
             <strong>频繁出现模式</strong>
             <span>一次可选多个卡口，按出现次数阈值筛出指定时间段内频繁出现车辆。</span>
+          </span>
+        </label>
+        <label class="choice-card">
+          <input type="radio" name="filter_mode" value="keyperson" {% if filter_mode == "keyperson" %}checked{% endif %}>
+          <span>
+            <strong>重点人模式</strong>
+            <span>匹配本地重点人库中的车辆，按频率和夜间时段占比进行综合风险评分。</span>
           </span>
         </label>
       </div>
@@ -284,6 +336,10 @@
               <span>可多选，当前已勾选 {{ selected_frequent_checkpoints|length }} 个</span>
             </div>
           </div>
+          <div class="select-all-bar">
+            <button type="button" class="btn btn-ghost btn-small" data-select-all="frequent_checkpoints">全选</button>
+            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="frequent_checkpoints">取消全选</button>
+          </div>
           <div class="checklist-panel checklist-panel-large">
             <div class="checklist-grid">
               {% for checkpoint in prioritized_checkpoint_library %}
@@ -302,13 +358,177 @@
         {% endif %}
       </section>
 
-      <div class="section-grid">
+      <div class=”section-grid” style=”grid-template-columns: minmax(0, 1fr) minmax(0, 2.2fr);”>
+        <section class=”section-card”>
+          <div class=”section-title”>出现次数阈值</div>
+          <div class=”section-hint”>默认值 2，表示同一车辆在所选卡口中的出现次数达到该阈值才会被筛出。</div>
+          <label for=”min_occurrence”>最小出现次数：</label>
+          <input type=”number” name=”min_occurrence” id=”min_occurrence”
+                 value=”{{ min_occurrence_value }}” min=”1” step=”1”>
+        </section>
+
+        <section class=”section-card”>
+          <div class=”section-title section-title-inline”>
+            <span>导出列选择（原文件）</span>
+            <span class=”selection-tag multi”>多选</span>
+          </div>
+          <div class=”section-hint”>导出会保留下列勾选项，并额外附加”出现次数”等聚合字段。表格展示也会同步这些合并列。</div>
+          {% if source_columns %}
+            <div class=”search-stack”>
+              <input type=”search” placeholder=”搜索列名，如：车牌、时间、地点” data-frequent-export-search>
+              <div class=”search-meta”>
+                <span data-export-column-status>正在加载...</span>
+                <span>可多选，已勾选 {{ selected_export_columns|length }} 列</span>
+              </div>
+            </div>
+            <div class=”select-all-bar”>
+              <button type=”button” class=”btn btn-ghost btn-small” data-select-all=”export_columns”>全选</button>
+              <button type=”button” class=”btn btn-ghost btn-small” data-deselect-all=”export_columns”>取消全选</button>
+            </div>
+            <div class=”checklist-panel checklist-panel-large”>
+              <div class=”checklist-grid”>
+                {% for column in source_columns %}
+                <label class=”check-item” data-frequent-export-item data-search=”{{ column|lower }}”>
+                  <input type=”checkbox” name=”export_columns” value=”{{ column }}” {% if column in selected_export_columns %}checked{% endif %}>
+                  <span>{{ column }}</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <div class=”empty-note”>
+              <strong>当前没有可选导出列</strong>
+              <p>请返回首页重新上传带表头的 Excel 文件。</p>
+            </div>
+          {% endif %}
+        </section>
+      </div>
+    </div>
+
+    <div data-mode-block="keyperson">
+      <section class="section-card">
+        <div class="section-title">日内时段（重点人模式）</div>
+        <div class="section-hint">按 24 小时制设置时段，仅比较每天的时分；支持跨天，例如 20:00 到 04:00。</div>
+        <div class="clock-grid">
+          <div class="clock-card">
+            <div class="clock-card-title">开始时间</div>
+            <div class="clock-row">
+              <select name="keyperson_start_hour" class="clock-select">
+                {% for hour in range(24) %}
+                  {% set hour_text = "%02d"|format(hour) %}
+                  <option value="{{ hour_text }}" {% if keyperson_start_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
+                {% endfor %}
+              </select>
+              <span class="clock-colon">:</span>
+              <select name="keyperson_start_minute" class="clock-select">
+                {% for minute in range(60) %}
+                  {% set minute_text = "%02d"|format(minute) %}
+                  <option value="{{ minute_text }}" {% if keyperson_start_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="clock-card">
+            <div class="clock-card-title">结束时间</div>
+            <div class="clock-row">
+              <select name="keyperson_end_hour" class="clock-select">
+                {% for hour in range(24) %}
+                  {% set hour_text = "%02d"|format(hour) %}
+                  <option value="{{ hour_text }}" {% if keyperson_end_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
+                {% endfor %}
+              </select>
+              <span class="clock-colon">:</span>
+              <select name="keyperson_end_minute" class="clock-select">
+                {% for minute in range(60) %}
+                  {% set minute_text = "%02d"|format(minute) %}
+                  <option value="{{ minute_text }}" {% if keyperson_end_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+        </div>
+        <small>示例：20:00-04:00 表示夜间跨天时段。</small>
+      </section>
+
+      <section class="section-card" data-keyperson-checkpoint-selector>
+        <div class="section-title section-title-inline">
+          <span>重点人模式卡口选择</span>
+          <span class="selection-tag multi">多选</span>
+        </div>
+        <div class="section-hint">可一次选择多个卡口，系统将统计重点人在这些卡口中的通行记录。</div>
+        {% if checkpoint_library %}
+          <div class="search-stack">
+            <input type="search" placeholder="搜索卡口，如：东门、收费站、主路段" data-keyperson-checkpoint-search>
+            <div class="search-meta">
+              <span data-keyperson-checkpoint-status>正在加载...</span>
+              <span>可多选，已勾选 {{ selected_keyperson_checkpoints|length }} 个</span>
+            </div>
+          </div>
+          <div class="select-all-bar">
+            <button type="button" class="btn btn-ghost btn-small" data-select-all="keyperson_checkpoints">全选</button>
+            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="keyperson_checkpoints">取消全选</button>
+          </div>
+          <div class="checklist-panel checklist-panel-large">
+            <div class="checklist-grid">
+              {% for checkpoint in prioritized_checkpoint_library %}
+              <label class="check-item" data-keyperson-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                <input type="checkbox" name="keyperson_checkpoints" value="{{ checkpoint }}" {% if checkpoint in selected_keyperson_checkpoints %}checked{% endif %}>
+                <span>{{ checkpoint }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+        {% else %}
+          <div class="empty-note">
+            <strong>暂无可选卡口</strong>
+            <p>请先使用上方小按钮导入卡口库。</p>
+          </div>
+        {% endif %}
+      </section>
+
+      <section class="section-card" data-keyperson-selector>
+        <div class="section-title section-title-inline">
+          <span>重点人选择</span>
+          <span class="selection-tag multi">多选</span>
+        </div>
+        <div class="section-hint">从本地重点人库中选择要分析的人员，系统将按其车牌号匹配通行记录。</div>
+        {% if keyperson_library %}
+          <div class="search-stack">
+            <input type="search" placeholder="搜索姓名、车牌号、身份证" data-keyperson-search>
+            <div class="search-meta">
+              <span data-keyperson-status>正在加载...</span>
+              <span>可多选，已勾选 {{ selected_keypersons|length }} 人</span>
+            </div>
+          </div>
+          <div class="select-all-bar">
+            <button type="button" class="btn btn-ghost btn-small" data-select-all="keyperson_selected">全选</button>
+            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="keyperson_selected">取消全选</button>
+          </div>
+          <div class="checklist-panel checklist-panel-large">
+            <div class="checklist-grid" data-keyperson-grid>
+              {% for person in keyperson_library %}
+              <label class="check-item" data-keyperson-item data-search="{{ (person.name ~ ' ' ~ person.plate ~ ' ' ~ person.id_card)|lower }}">
+                <input type="checkbox" name="keyperson_selected" value="{{ person.plate }}" {% if person.plate in selected_keypersons %}checked{% endif %}>
+                <span>{{ person.name or '未命名' }}（{{ person.plate }}）{% if person.id_card %} {{ person.id_card[:6] }}...{% endif %}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+        {% else %}
+          <div class="empty-note">
+            <strong>本地重点人库为空</strong>
+            <p>请先通过上方"重点人库管理"导入重点人数据。</p>
+          </div>
+        {% endif %}
+      </section>
+
+      <div class="section-grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 2.2fr);">
         <section class="section-card">
           <div class="section-title">出现次数阈值</div>
-          <div class="section-hint">默认值 2，表示同一车辆在所选卡口中的出现次数达到该阈值才会被筛出。</div>
-          <label for="min_occurrence">最小出现次数：</label>
-          <input type="number" name="min_occurrence" id="min_occurrence"
-                 value="{{ min_occurrence_value }}" min="1" step="1">
+          <div class="section-hint">同一重点人在所选卡口的出现次数达到该值才会被筛出。</div>
+          <label for="keyperson_min_occurrence">最小出现次数：</label>
+          <input type="number" name="keyperson_min_occurrence" id="keyperson_min_occurrence"
+                 value="{{ keyperson_min_occurrence }}" min="1" step="1">
         </section>
 
         <section class="section-card">
@@ -316,19 +536,29 @@
             <span>导出列选择（原文件）</span>
             <span class="selection-tag multi">多选</span>
           </div>
-          <div class="section-hint">导出会保留下列勾选项，并额外附加“出现次数”等聚合字段。表格展示也会同步这些合并列。</div>
+          <div class="section-hint">导出会保留下列勾选项，并额外附加重点人信息和评分等聚合字段。</div>
           {% if source_columns %}
+            <div class="search-stack">
+              <input type="search" placeholder="搜索列名，如：车牌、时间、地点" data-keyperson-export-search>
+              <div class="search-meta">
+                <span data-keyperson-export-column-status>正在加载...</span>
+                <span>可多选，已勾选 {{ selected_export_columns|length }} 列</span>
+              </div>
+            </div>
+            <div class="select-all-bar">
+              <button type="button" class="btn btn-ghost btn-small" data-select-all="export_columns">全选</button>
+              <button type="button" class="btn btn-ghost btn-small" data-deselect-all="export_columns">取消全选</button>
+            </div>
             <div class="checklist-panel checklist-panel-large">
-              <div class="checklist-grid">
+              <div class="checklist-grid" data-keyperson-export-grid>
                 {% for column in source_columns %}
-                <label class="check-item">
+                <label class="check-item" data-keyperson-export-item data-search="{{ column|lower }}">
                   <input type="checkbox" name="export_columns" value="{{ column }}" {% if column in selected_export_columns %}checked{% endif %}>
                   <span>{{ column }}</span>
                 </label>
                 {% endfor %}
               </div>
             </div>
-            <small data-export-column-status>已选择 {{ selected_export_columns|length }} 列。</small>
           {% else %}
             <div class="empty-note">
               <strong>当前没有可选导出列</strong>
@@ -350,6 +580,9 @@
       <div class="toolbar-note" data-mode-note="frequent">
         频繁模式按日内时段筛选（支持跨天，如 20:00-04:00），并对同一车辆做聚合展示。
       </div>
+      <div class="toolbar-note" data-mode-note="keyperson">
+        重点人模式按日内时段匹配重点人车牌通行记录，结合频率和夜间时段占比进行综合风险评分。
+      </div>
     </div>
   </form>
 {% endblock %}
@@ -358,29 +591,25 @@
   <script>
     (function () {
       function initCheckpointSelector(section) {
-        const input = section.querySelector("[data-search-input]");
-        const status = section.querySelector("[data-search-status]");
-        const items = Array.from(section.querySelectorAll("[data-checkpoint-item]"));
-        const totalCurrent = items.filter((item) => item.dataset.current === "1").length;
+        var input = section.querySelector("[data-search-input]");
+        var status = section.querySelector("[data-search-status]");
+        var items = Array.from(section.querySelectorAll("[data-checkpoint-item]"));
+        var totalCurrent = items.filter(function (item) { return item.dataset.current === "1"; }).length;
 
-        if (!input || !status || !items.length) {
-          return;
-        }
+        if (!input || !status || !items.length) return;
 
         function renderMatches() {
-          const query = input.value.trim().toLowerCase();
-          const matchedItems = [];
-          const currentMatchedItems = [];
+          var query = input.value.trim().toLowerCase();
+          var matchedItems = [];
+          var currentMatchedItems = [];
 
-          items.forEach((item) => {
-            const text = item.dataset.search || "";
-            const matched = !query || text.includes(query);
+          items.forEach(function (item) {
+            var text = item.dataset.search || "";
+            var matched = !query || text.includes(query);
             item.classList.toggle("check-item-hidden", !matched);
             if (matched) {
               matchedItems.push(item);
-              if (item.dataset.current === "1") {
-                currentMatchedItems.push(item);
-              }
+              if (item.dataset.current === "1") currentMatchedItems.push(item);
             }
           });
 
@@ -396,109 +625,236 @@
       }
 
       function initFrequentSelector(section) {
-        const input = section.querySelector("[data-frequent-search]");
-        const status = section.querySelector("[data-frequent-status]");
-        const items = Array.from(section.querySelectorAll("[data-frequent-item]"));
-        const checkboxes = items
-          .map((item) => item.querySelector('input[type="checkbox"]'))
-          .filter(Boolean);
-        const totalCurrent = items.filter((item) => item.dataset.current === "1").length;
+        var input = section.querySelector("[data-frequent-search]");
+        var status = section.querySelector("[data-frequent-status]");
+        var items = Array.from(section.querySelectorAll("[data-frequent-item]"));
+        var checkboxes = items.map(function (item) { return item.querySelector('input[type="checkbox"]'); }).filter(Boolean);
+        var totalCurrent = items.filter(function (item) { return item.dataset.current === "1"; }).length;
 
-        if (!input || !status || !items.length) {
-          return;
-        }
+        if (!input || !status || !items.length) return;
 
         function renderMatches() {
-          const query = input.value.trim().toLowerCase();
-          let matchedCount = 0;
-          let currentMatchedCount = 0;
-          let selectedCount = 0;
+          var query = input.value.trim().toLowerCase();
+          var matchedCount = 0, currentMatchedCount = 0, selectedCount = 0;
 
-          items.forEach((item) => {
-            const text = item.dataset.search || "";
-            const matched = !query || text.includes(query);
+          items.forEach(function (item) {
+            var text = item.dataset.search || "";
+            var matched = !query || text.includes(query);
             item.classList.toggle("check-item-hidden", !matched);
-            if (matched) {
-              matchedCount += 1;
-              if (item.dataset.current === "1") {
-                currentMatchedCount += 1;
-              }
-            }
+            if (matched) { matchedCount++; if (item.dataset.current === "1") currentMatchedCount++; }
           });
-
-          checkboxes.forEach((checkbox) => {
-            if (checkbox.checked) {
-              selectedCount += 1;
-            }
-          });
+          checkboxes.forEach(function (cb) { if (cb.checked) selectedCount++; });
 
           if (query) {
-            status.textContent = "实时匹配 " + matchedCount + " 个卡口（命中当前数据 " + currentMatchedCount + " 个），已勾选 " + selectedCount + " 个";
+            status.textContent = "实时匹配 " + matchedCount + " 个卡口（命中 " + currentMatchedCount + " 个），已勾选 " + selectedCount + " 个";
           } else {
-            status.textContent = "显示全部 " + items.length + " 个卡口（命中当前数据 " + totalCurrent + " 个），已勾选 " + selectedCount + " 个";
+            status.textContent = "显示全部 " + items.length + " 个卡口（命中 " + totalCurrent + " 个），已勾选 " + selectedCount + " 个";
           }
         }
 
         input.addEventListener("input", renderMatches);
-        checkboxes.forEach((checkbox) => checkbox.addEventListener("change", renderMatches));
+        checkboxes.forEach(function (cb) { cb.addEventListener("change", renderMatches); });
         renderMatches();
       }
 
-      function initExportColumnStatus(form) {
-        const status = form.querySelector("[data-export-column-status]");
-        const inputs = Array.from(form.querySelectorAll('input[name="export_columns"]'));
+      // 重点人模式 - 卡口搜索
+      function initKeypersonCheckpointSelector(section) {
+        var input = section.querySelector("[data-keyperson-checkpoint-search]");
+        var status = section.querySelector("[data-keyperson-checkpoint-status]");
+        var items = Array.from(section.querySelectorAll("[data-keyperson-checkpoint-item]"));
+        var checkboxes = items.map(function (item) { return item.querySelector('input[type="checkbox"]'); }).filter(Boolean);
+        var totalCurrent = items.filter(function (item) { return item.dataset.current === "1"; }).length;
 
-        if (!status || !inputs.length) {
+        if (!input || !status || !items.length) return;
+
+        function render() {
+          var query = input.value.trim().toLowerCase();
+          var matched = 0, currentMatched = 0, selected = 0;
+          items.forEach(function (item) {
+            var text = item.dataset.search || "";
+            var ok = !query || text.includes(query);
+            item.classList.toggle("check-item-hidden", !ok);
+            if (ok) { matched++; if (item.dataset.current === "1") currentMatched++; }
+          });
+          checkboxes.forEach(function (cb) { if (cb.checked) selected++; });
+          if (query) {
+            status.textContent = "实时匹配 " + matched + " 个卡口（命中 " + currentMatched + " 个），已勾选 " + selected + " 个";
+          } else {
+            status.textContent = "显示全部 " + items.length + " 个卡口（命中 " + totalCurrent + " 个），已勾选 " + selected + " 个";
+          }
+        }
+        input.addEventListener("input", render);
+        checkboxes.forEach(function (cb) { cb.addEventListener("change", render); });
+        render();
+      }
+
+      // 重点人模式 - 人员搜索
+      function initKeypersonSelector(section) {
+        var input = section.querySelector("[data-keyperson-search]");
+        var status = section.querySelector("[data-keyperson-status]");
+        var items = Array.from(section.querySelectorAll("[data-keyperson-item]"));
+        var checkboxes = items.map(function (item) { return item.querySelector('input[type="checkbox"]'); }).filter(Boolean);
+
+        if (!input || !status || !items.length) return;
+
+        function render() {
+          var query = input.value.trim().toLowerCase();
+          var matched = 0, selected = 0;
+          items.forEach(function (item) {
+            var text = item.dataset.search || "";
+            var ok = !query || text.includes(query);
+            item.classList.toggle("check-item-hidden", !ok);
+            if (ok) matched++;
+          });
+          checkboxes.forEach(function (cb) { if (cb.checked) selected++; });
+          if (query) {
+            status.textContent = "实时匹配 " + matched + " 人，已勾选 " + selected + " 人";
+          } else {
+            status.textContent = "显示全部 " + items.length + " 人，已勾选 " + selected + " 人";
+          }
+        }
+        input.addEventListener("input", render);
+        checkboxes.forEach(function (cb) { cb.addEventListener("change", render); });
+        render();
+      }
+
+      // 重点人导出列搜索
+      function initKeypersonExportColumnStatus(form) {
+        var input = form.querySelector("[data-keyperson-export-search]");
+        var status = form.querySelector("[data-keyperson-export-column-status]");
+        var items = Array.from(form.querySelectorAll("[data-keyperson-export-item]"));
+        var checkboxes = items.map(function (item) { return item.querySelector('input[type="checkbox"]'); }).filter(Boolean);
+
+        if (!status || !items.length) return;
+
+        function renderStatus() {
+          var query = input ? input.value.trim().toLowerCase() : "";
+          var matchedCount = 0, selectedCount = 0;
+
+          items.forEach(function (item) {
+            var text = item.dataset.search || "";
+            var matched = !query || text.includes(query);
+            item.classList.toggle("check-item-hidden", !matched);
+            if (matched) matchedCount++;
+          });
+          checkboxes.forEach(function (cb) { if (cb.checked) selectedCount++; });
+
+          if (query) {
+            status.textContent = "实时匹配 " + matchedCount + " 列，已勾选 " + selectedCount + " 列";
+          } else {
+            status.textContent = "显示全部 " + items.length + " 列，已勾选 " + selectedCount + " 列";
+          }
+        }
+
+        if (input) input.addEventListener("input", renderStatus);
+        checkboxes.forEach(function (cb) { cb.addEventListener("change", renderStatus); });
+        renderStatus();
+      }
+
+      // 频繁模式导出列搜索
+      function initExportColumnStatus(form) {
+        var input = form.querySelector("[data-frequent-export-search]");
+        var status = form.querySelector("[data-export-column-status]");
+        var items = Array.from(form.querySelectorAll("[data-frequent-export-item]"));
+        var checkboxes = items.map(function (item) { return item.querySelector('input[type="checkbox"]'); }).filter(Boolean);
+
+        if (!status) return;
+        if (!items.length) {
+          var fallbackInputs = Array.from(form.querySelectorAll('input[name="export_columns"]'));
+          if (!fallbackInputs.length) return;
+          function fallbackRender() {
+            var cnt = fallbackInputs.filter(function (i) { return i.checked; }).length;
+            status.textContent = cnt > 0 ? "已选择 " + cnt + " 列" : "未勾选时将自动使用默认列。";
+          }
+          fallbackInputs.forEach(function (i) { i.addEventListener("change", fallbackRender); });
+          fallbackRender();
           return;
         }
 
         function renderStatus() {
-          const selectedCount = inputs.filter((input) => input.checked).length;
-          if (selectedCount > 0) {
-            status.textContent = "已选择 " + selectedCount + " 列，导出将附加出现次数等聚合字段。";
+          var query = input ? input.value.trim().toLowerCase() : "";
+          var matchedCount = 0, selectedCount = 0;
+
+          items.forEach(function (item) {
+            var text = item.dataset.search || "";
+            var matched = !query || text.includes(query);
+            item.classList.toggle("check-item-hidden", !matched);
+            if (matched) matchedCount++;
+          });
+          checkboxes.forEach(function (cb) { if (cb.checked) selectedCount++; });
+
+          if (query) {
+            status.textContent = "实时匹配 " + matchedCount + " 列，已勾选 " + selectedCount + " 列";
           } else {
-            status.textContent = "未勾选时将自动使用默认列。";
+            status.textContent = "显示全部 " + items.length + " 列，已勾选 " + selectedCount + " 列";
           }
         }
 
-        inputs.forEach((input) => input.addEventListener("change", renderStatus));
+        if (input) input.addEventListener("input", renderStatus);
+        checkboxes.forEach(function (cb) { cb.addEventListener("change", renderStatus); });
         renderStatus();
       }
 
       function initModeSwitch(form) {
-        const modeInputs = Array.from(form.querySelectorAll('input[name="filter_mode"]'));
-        const modeBlocks = Array.from(form.querySelectorAll("[data-mode-block]"));
-        const modeNotes = Array.from(form.querySelectorAll("[data-mode-note]"));
+        var modeInputs = Array.from(form.querySelectorAll('input[name="filter_mode"]'));
+        var modeBlocks = Array.from(document.querySelectorAll("[data-mode-block]"));
+        var modeNotes = Array.from(form.querySelectorAll("[data-mode-note]"));
 
-        if (!modeInputs.length) {
-          return;
-        }
+        if (!modeInputs.length) return;
 
         function syncMode() {
-          const active = modeInputs.find((input) => input.checked);
-          const mode = active ? active.value : "pair";
+          var active = modeInputs.find(function (input) { return input.checked; });
+          var mode = active ? active.value : "pair";
 
-          modeBlocks.forEach((block) => {
+          modeBlocks.forEach(function (block) {
             block.style.display = block.dataset.modeBlock === mode ? "" : "none";
           });
-
-          modeNotes.forEach((note) => {
+          modeNotes.forEach(function (note) {
             note.style.display = note.dataset.modeNote === mode ? "" : "none";
           });
         }
 
-        modeInputs.forEach((input) => input.addEventListener("change", syncMode));
+        modeInputs.forEach(function (input) { input.addEventListener("change", syncMode); });
         syncMode();
       }
 
+      // 重点人文件上传按钮
+      document.querySelectorAll("[data-keyperson-file-trigger]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var input = btn.closest("form").querySelector('input[type="file"]');
+          if (input) input.click();
+        });
+      });
+
       document.querySelectorAll("[data-checkpoint-selector]").forEach(initCheckpointSelector);
       document.querySelectorAll("[data-frequent-selector]").forEach(initFrequentSelector);
+      document.querySelectorAll("[data-keyperson-checkpoint-selector]").forEach(initKeypersonCheckpointSelector);
+      document.querySelectorAll("[data-keyperson-selector]").forEach(initKeypersonSelector);
 
-      const filterForm = document.getElementById("filter-form");
+      var filterForm = document.getElementById("filter-form");
       if (filterForm) {
         initModeSwitch(filterForm);
         initExportColumnStatus(filterForm);
+        initKeypersonExportColumnStatus(filterForm);
       }
+
+      // 全选 / 取消全选
+      document.addEventListener("click", function (e) {
+        var selectAllName = e.target.getAttribute("data-select-all");
+        var deselectAllName = e.target.getAttribute("data-deselect-all");
+        var name = selectAllName || deselectAllName;
+        if (!name) return;
+        e.preventDefault();
+
+        var checkboxes = document.querySelectorAll('input[type="checkbox"][name="' + name + '"]');
+        var isChecked = !!selectAllName;
+        checkboxes.forEach(function (cb) {
+          var label = cb.closest("label");
+          if (label && label.classList.contains("check-item-hidden")) return;
+          cb.checked = isChecked;
+          cb.dispatchEvent(new Event("change", { bubbles: false }));
+        });
+      });
     })();
   </script>
 {% endblock %}

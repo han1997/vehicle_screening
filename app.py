@@ -14,17 +14,20 @@ from flask import Flask, render_template, request, redirect, url_for, send_file,
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "change-this-secret"  # 本地使用即可，如需部署请修改
 app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 100 MB
 
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"xls", "xlsx"}
 CHECKPOINT_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "checkpoint_library.json")
+KEYPERSON_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "keyperson_library.json")
 FILTER_MODE_PAIR = "pair"
 FILTER_MODE_FREQUENT = "frequent"
+FILTER_MODE_KEYPERSON = "keyperson"
 DEFAULT_FREQUENT_OCCURRENCE = 2
 DEFAULT_FREQUENT_START_CLOCK = "00:00"
 DEFAULT_FREQUENT_END_CLOCK = "23:59"
+DEFAULT_KEYPERSON_MIN_OCCURRENCE = 1
 SOURCE_COLUMN_PREFIX = "__source__"
 PAGE_SIZE = 100
 
@@ -83,6 +86,16 @@ def _restore_frequent_dtypes(df):
     return df
 
 
+def _restore_keyperson_dtypes(df):
+    """重点人模式结果恢复时间列和布尔列。"""
+    for col in ("first_time", "last_time", "event_time"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    if "group_first" in df.columns:
+        df["group_first"] = df["group_first"].astype(bool)
+    return df
+
+
 def _touch_session(data_id):
     """更新会话最后访问时间。"""
     if data_id in DATA_STORE:
@@ -115,7 +128,7 @@ def normalize_text_value(value):
     """将任意值标准化为可比较文本。"""
     if value is None or pd.isna(value):
         return ""
-    text = str(value).strip()
+    text = str(value).replace("\xa0", " ").strip()
     if not text:
         return ""
     if text.lower() in {"nan", "none", "nat"}:
@@ -160,6 +173,15 @@ def normalize_excel_headers(columns):
         normalized.append(name)
 
     return normalized
+
+
+def excel_column_name(n):
+    """将列序号转为 Excel 列名（1→A, 26→Z, 27→AA, ...）。"""
+    result = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        result = chr(65 + r) + result
+    return result
 
 
 def source_column_key(column_name):
@@ -322,6 +344,125 @@ def save_checkpoint_library(checkpoints):
     with open(CHECKPOINT_LIBRARY_FILE, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
     return normalized
+
+
+def load_keyperson_library():
+    """从本地文件加载重点人库。"""
+    if not os.path.exists(KEYPERSON_LIBRARY_FILE):
+        return []
+
+    try:
+        with open(KEYPERSON_LIBRARY_FILE, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    if isinstance(payload, dict):
+        persons = payload.get("keypersons", [])
+    else:
+        persons = []
+
+    if not isinstance(persons, list):
+        return []
+
+    normalized = []
+    for entry in persons:
+        if not isinstance(entry, dict):
+            continue
+        plate = normalize_text_value(entry.get("plate"))
+        if not plate:
+            continue
+        normalized.append({
+            "name": normalize_text_value(entry.get("name")),
+            "id_card": normalize_text_value(entry.get("id_card")),
+            "phone": normalize_text_value(entry.get("phone")),
+            "plate": plate,
+        })
+
+    return sorted(normalized, key=lambda p: (p["name"], p["plate"]))
+
+
+def save_keyperson_library(keypersons):
+    """将重点人库保存到本地文件。"""
+    seen_plates = set()
+    deduped = []
+    for person in keypersons:
+        if not isinstance(person, dict):
+            continue
+        plate = normalize_text_value(person.get("plate"))
+        if not plate:
+            continue
+        if plate in seen_plates:
+            continue
+        seen_plates.add(plate)
+        deduped.append({
+            "name": normalize_text_value(person.get("name")),
+            "id_card": normalize_text_value(person.get("id_card")),
+            "phone": normalize_text_value(person.get("phone")),
+            "plate": plate,
+        })
+
+    deduped.sort(key=lambda p: (p["name"], p["plate"]))
+    payload = {"keypersons": deduped, "updated_at": datetime.now().isoformat(timespec="seconds")}
+    with open(KEYPERSON_LIBRARY_FILE, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+    return deduped
+
+
+def parse_keyperson_excel(path):
+    """解析重点人 Excel 文件，返回 list[dict]。"""
+    df = pd.read_excel(path, dtype=str)
+    df.columns = normalize_excel_headers(df.columns)
+
+    # 列名自动匹配：先用精确匹配，再用子串包含匹配
+    def _match_column(candidates):
+        normalized = {col: normalize_text_value(col).lower() for col in df.columns}
+        # 精确匹配
+        for cand in candidates:
+            cand_lower = normalize_text_value(cand).lower()
+            for original, norm in normalized.items():
+                if norm == cand_lower:
+                    return original
+        # 子串匹配：候选词被包含在列名中
+        for cand in candidates:
+            cand_lower = normalize_text_value(cand).lower()
+            for original, norm in normalized.items():
+                if cand_lower in norm:
+                    return original
+        return None
+
+    name_col = _match_column(["姓名", "名字", "name"])
+    id_card_col = _match_column(["身份证号码", "身份证号", "身份证", "证件号码", "证件号", "id_card", "idcard"])
+    phone_col = _match_column(["手机号", "手机", "电话", "联系电话", "phone", "mobile"])
+    plate_col = _match_column(["号牌号码", "车牌号码", "车牌号", "号牌", "车牌", "plate"])
+
+    if not plate_col:
+        raise ValueError('未找到车牌号列，请确保 Excel 中包含"车牌号"或"车牌号码"列。')
+
+    persons = []
+    for _, row in df.iterrows():
+        plate = normalize_text_value(row.get(plate_col))
+        if not plate:
+            continue
+        if plate in ("无牌车", "未识别"):
+            continue
+        persons.append({
+            "name": normalize_text_value(row.get(name_col)) if name_col else "",
+            "id_card": normalize_text_value(row.get(id_card_col)) if id_card_col else "",
+            "phone": normalize_text_value(row.get(phone_col)) if phone_col else "",
+            "plate": plate,
+        })
+
+    return persons
+
+
+def get_keyperson_level(total_score):
+    """根据综合评分返回重点人风险等级。"""
+    if total_score >= 70:
+        return "red", "高风险"
+    if total_score >= 40:
+        return "yellow", "中风险"
+    return "blue", "低风险"
 
 
 def prune_removed_checkpoints_from_config(config, removed_checkpoints):
@@ -639,6 +780,157 @@ def build_frequent_filtered_dataframe(
     return filtered_df, matched_records, filtered_vehicle_count
 
 
+def build_keyperson_filtered_dataframe(
+    df, start_clock, end_clock, active_checkpoints, keyperson_lookup, min_occurrence,
+):
+    """重点人模式：匹配重点人车牌的通行记录并综合评分。"""
+    keyperson_plates = set(keyperson_lookup.keys())
+    df_valid = df[df["location"].isin(set(active_checkpoints))].copy()
+    df_valid = df_valid[df_valid["plate"].isin(keyperson_plates)]
+
+    start_minutes = clock_to_minutes(start_clock)
+    end_minutes = clock_to_minutes(end_clock)
+    clock_minutes = df_valid["time"].dt.hour * 60 + df_valid["time"].dt.minute
+    if start_minutes <= end_minutes:
+        time_mask = (clock_minutes >= start_minutes) & (clock_minutes <= end_minutes)
+    else:
+        time_mask = (clock_minutes >= start_minutes) | (clock_minutes <= end_minutes)
+
+    df_valid = df_valid[time_mask]
+    df_valid = df_valid.sort_values("time")
+    matched_records = int(len(df_valid))
+
+    detail_rows = []
+    filtered_vehicle_count = 0
+
+    for plate, group in df_valid.groupby("plate", sort=False):
+        occurrence_count = int(len(group))
+        if occurrence_count < min_occurrence:
+            continue
+
+        filtered_vehicle_count += 1
+        group_sorted = group.sort_values("time")
+        first_time = group_sorted["time"].iloc[0]
+        last_time = group_sorted["time"].iloc[-1]
+        duration_minutes = (last_time - first_time).total_seconds() / 60.0
+
+        # 夜间时段统计（22:00-06:00）
+        hours = group_sorted["time"].dt.hour
+        nighttime_mask = (hours >= 22) | (hours < 6)
+        nighttime_count = int(nighttime_mask.sum())
+        nighttime_ratio = nighttime_count / occurrence_count if occurrence_count > 0 else 0.0
+
+        # 综合评分
+        frequency_score = min(60, occurrence_count * 12)
+        time_score = round(nighttime_ratio * 40, 1)
+        total_score = round(frequency_score + time_score, 1)
+        level, level_label = get_keyperson_level(total_score)
+
+        checkpoint_counts = group_sorted["location"].value_counts()
+        checkpoint_summary = "、".join(
+            f"{location} × {int(count)}" for location, count in checkpoint_counts.items()
+        )
+        group_size = int(len(group_sorted))
+        summary_plate_type = merge_distinct_values(group_sorted["plate_type"].tolist())
+
+        person_info = keyperson_lookup.get(plate, {})
+
+        for idx, row in enumerate(group_sorted.to_dict(orient="records")):
+            detail_rows.append({
+                "plate": plate,
+                "plate_type_summary": summary_plate_type,
+                "person_name": person_info.get("name", ""),
+                "person_id_card": person_info.get("id_card", ""),
+                "person_phone": person_info.get("phone", ""),
+                "occurrence_count": occurrence_count,
+                "nighttime_count": nighttime_count,
+                "nighttime_ratio": nighttime_ratio,
+                "frequency_score": frequency_score,
+                "time_score": time_score,
+                "total_score": total_score,
+                "level": level,
+                "level_label": level_label,
+                "first_time": first_time,
+                "last_time": last_time,
+                "duration_minutes": round(duration_minutes, 2),
+                "checkpoint_count": int(checkpoint_counts.size),
+                "checkpoint_summary": checkpoint_summary,
+                "event_time": row.get("time"),
+                "event_location": normalize_text_value(row.get("location")),
+                "event_plate_type": normalize_text_value(row.get("plate_type")),
+                "group_row_index": idx,
+                "group_size": group_size,
+                "group_first": idx == 0,
+            })
+
+            for column in df.columns:
+                if not str(column).startswith(SOURCE_COLUMN_PREFIX):
+                    continue
+                detail_rows[-1][column] = row.get(column)
+
+    if detail_rows:
+        filtered_df = pd.DataFrame(detail_rows)
+        filtered_df = filtered_df.sort_values(
+            ["total_score", "occurrence_count", "plate", "event_time"],
+            ascending=[False, False, True, True],
+        )
+    else:
+        filtered_df = pd.DataFrame(columns=[
+            "plate", "plate_type_summary", "person_name", "person_id_card", "person_phone",
+            "occurrence_count", "nighttime_count", "nighttime_ratio",
+            "frequency_score", "time_score", "total_score", "level", "level_label",
+            "first_time", "last_time", "duration_minutes",
+            "checkpoint_count", "checkpoint_summary",
+            "event_time", "event_location", "event_plate_type",
+            "group_row_index", "group_size", "group_first",
+        ])
+
+    return filtered_df, matched_records, filtered_vehicle_count
+
+
+def build_keyperson_results_summary(df, matched_records, threshold):
+    """统计重点人模式的结果概览。"""
+    summary = {
+        "total_persons": 0,
+        "matched_records": int(matched_records),
+        "threshold": int(threshold),
+        "max_occurrence": 0,
+        "avg_occurrence": 0.0,
+        "max_score": 0.0,
+        "avg_nighttime_ratio": 0.0,
+        "persons_with_nighttime": 0,
+    }
+
+    if df is None or df.empty:
+        return summary
+
+    if "plate" in df.columns:
+        vehicle_df = df.drop_duplicates(subset=["plate"])
+    else:
+        vehicle_df = df.copy()
+
+    summary["total_persons"] = int(len(vehicle_df))
+
+    if "occurrence_count" in vehicle_df.columns:
+        occ = pd.to_numeric(vehicle_df["occurrence_count"], errors="coerce").dropna()
+        if not occ.empty:
+            summary["max_occurrence"] = int(occ.max())
+            summary["avg_occurrence"] = round(float(occ.mean()), 2)
+
+    if "total_score" in vehicle_df.columns:
+        scores = pd.to_numeric(vehicle_df["total_score"], errors="coerce").dropna()
+        if not scores.empty:
+            summary["max_score"] = round(float(scores.max()), 1)
+
+    if "nighttime_ratio" in vehicle_df.columns:
+        ratios = pd.to_numeric(vehicle_df["nighttime_ratio"], errors="coerce").dropna()
+        if not ratios.empty:
+            summary["avg_nighttime_ratio"] = round(float(ratios.mean()), 2)
+            summary["persons_with_nighttime"] = int((ratios > 0).sum())
+
+    return summary
+
+
 def build_pair_display_results(filtered_df):
     """构造第一/第二卡口模式的前端展示数据。"""
     display_results = []
@@ -710,6 +1002,52 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
     return display_results
 
 
+def build_keyperson_display_results(filtered_df, selected_export_columns):
+    """构造重点人模式的前端展示数据。"""
+    display_export_columns = [c for c in selected_export_columns if not _is_overlapping_column(c)]
+
+    display_results = []
+
+    for row in filtered_df.to_dict(orient="records"):
+        group_size = int(row.get("group_size", 1) or 1)
+        group_first = bool(row.get("group_first", False))
+
+        detail_columns = []
+        for column in display_export_columns:
+            detail_columns.append({
+                "name": column,
+                "value": normalize_text_value(row.get(source_column_key(column), "")),
+            })
+
+        display_results.append({
+            "plate": normalize_text_value(row.get("plate", "")),
+            "plate_type": normalize_text_value(row.get("plate_type_summary", "")),
+            "person_name": normalize_text_value(row.get("person_name", "")),
+            "person_id_card": normalize_text_value(row.get("person_id_card", "")),
+            "person_phone": normalize_text_value(row.get("person_phone", "")),
+            "occurrence_count": int(row.get("occurrence_count", 0) or 0),
+            "nighttime_count": int(row.get("nighttime_count", 0) or 0),
+            "nighttime_ratio": float(row.get("nighttime_ratio", 0.0) or 0.0),
+            "frequency_score": float(row.get("frequency_score", 0.0) or 0.0),
+            "time_score": float(row.get("time_score", 0.0) or 0.0),
+            "total_score": float(row.get("total_score", 0.0) or 0.0),
+            "first_time": format_datetime_string(row.get("first_time")),
+            "last_time": format_datetime_string(row.get("last_time")),
+            "duration_minutes": float(row.get("duration_minutes", 0.0) or 0.0),
+            "checkpoint_count": int(row.get("checkpoint_count", 0) or 0),
+            "checkpoint_summary": normalize_text_value(row.get("checkpoint_summary", "")),
+            "event_time": format_datetime_string(row.get("event_time")),
+            "event_location": normalize_text_value(row.get("event_location", "")),
+            "level": row.get("level", "blue"),
+            "level_label": row.get("level_label", "低风险"),
+            "group_size": group_size,
+            "group_first": group_first,
+            "detail_columns": detail_columns,
+        })
+
+    return display_results
+
+
 def paginate_results(results, page, filter_mode):
     """对结果列表分页，频繁模式按车辆组边界切割避免断行。"""
     if not results:
@@ -724,7 +1062,7 @@ def paginate_results(results, page, filter_mode):
         end = min(start + PAGE_SIZE, total)
         return results[start:end], total_pages, page > 1, page < total_pages
 
-    # 频繁模式：按车辆组边界分页
+    # 频繁/重点人模式：按车辆组边界分页
     group_starts = [i for i, r in enumerate(results) if r.get("group_first")]
     total_groups = len(group_starts)
     if total_groups == 0:
@@ -857,7 +1195,74 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
     return export_df[all_columns], merge_ranges, risk_levels
 
 
-def excel_column_name(index):
+def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
+    """构造重点人模式导出表，并返回需要合并的单元格信息和风险级别列表。"""
+    summary_columns = [
+        "车牌号", "姓名", "身份证", "手机",
+        "出现次数", "夜间出现次数", "夜间占比",
+        "频率评分", "时间评分", "综合评分",
+        "首次出现时间", "最后出现时间", "覆盖时长（分钟）",
+        "涉及卡口数", "卡口分布", "风险等级",
+    ]
+    detail_columns = [
+        "本条抓拍时间",
+        "本条卡口",
+        "本条号牌种类",
+    ]
+    all_columns = summary_columns + detail_columns + selected_export_columns
+
+    if filtered_df is None or filtered_df.empty:
+        return pd.DataFrame(columns=all_columns), [], []
+
+    export_rows = []
+    merge_ranges = []
+    risk_levels = []
+    excel_row = 2
+
+    for row in filtered_df.to_dict(orient="records"):
+        level = row.get("level", "blue")
+        level_label = row.get("level_label", "低风险")
+        risk_levels.append(level)
+
+        nighttime_ratio = float(row.get("nighttime_ratio", 0.0) or 0.0)
+        export_row = {
+            "车牌号": normalize_text_value(row.get("plate", "")),
+            "姓名": normalize_text_value(row.get("person_name", "")),
+            "身份证": normalize_text_value(row.get("person_id_card", "")),
+            "手机": normalize_text_value(row.get("person_phone", "")),
+            "出现次数": int(row.get("occurrence_count", 0) or 0),
+            "夜间出现次数": int(row.get("nighttime_count", 0) or 0),
+            "夜间占比": f"{nighttime_ratio:.0%}",
+            "频率评分": float(row.get("frequency_score", 0.0) or 0.0),
+            "时间评分": float(row.get("time_score", 0.0) or 0.0),
+            "综合评分": float(row.get("total_score", 0.0) or 0.0),
+            "首次出现时间": format_datetime_string(row.get("first_time")),
+            "最后出现时间": format_datetime_string(row.get("last_time")),
+            "覆盖时长（分钟）": round(float(row.get("duration_minutes", 0.0) or 0.0), 2),
+            "涉及卡口数": int(row.get("checkpoint_count", 0) or 0),
+            "卡口分布": normalize_text_value(row.get("checkpoint_summary", "")),
+            "风险等级": level_label,
+            "本条抓拍时间": format_datetime_string(row.get("event_time")),
+            "本条卡口": normalize_text_value(row.get("event_location", "")),
+            "本条号牌种类": normalize_text_value(row.get("event_plate_type", "")),
+        }
+
+        for column in selected_export_columns:
+            export_row[column] = normalize_text_value(row.get(source_column_key(column), ""))
+
+        export_rows.append(export_row)
+        if bool(row.get("group_first", False)):
+            group_size = int(row.get("group_size", 1) or 1)
+            if group_size > 1:
+                start_row = excel_row
+                end_row = excel_row + group_size - 1
+                for column in summary_columns:
+                    col_idx = all_columns.index(column) + 1
+                    merge_ranges.append((start_row, end_row, col_idx))
+        excel_row += 1
+
+    export_df = pd.DataFrame(export_rows)
+    return export_df[all_columns], merge_ranges, risk_levels
     """将 1-based 列号转换为 Excel 列名。"""
     result = ""
     while index > 0:
@@ -1177,7 +1582,114 @@ def build_frequent_warning_workbook(export_df, risk_levels, summary, merge_range
     return output
 
 
-def find_matching_column(df, candidates):
+def build_keyperson_warning_workbook(export_df, risk_levels, summary, merge_ranges):
+    """生成重点人模式带风险底色的 xlsx 文件，支持合并单元格。"""
+    output = BytesIO()
+    columns = export_df.columns.tolist()
+    last_col = excel_column_name(len(columns))
+    last_row = len(export_df) + 4
+    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    summary_text = (
+        f"高风险 {summary.get('red', 0)} 人  |  中风险 {summary.get('yellow', 0)} 人  |  "
+        f"低风险 {summary.get('blue', 0)} 人  |  共 {summary.get('total_persons', 0)} 人"
+    )
+
+    row_parts = []
+    row_parts.append(
+        '<row r="1" ht="28" customHeight="1">'
+        + build_xlsx_inline_cell("A1", "重点人车辆筛选结果", 1)
+        + "</row>"
+    )
+    row_parts.append(
+        '<row r="2" ht="22" customHeight="1">'
+        + build_xlsx_inline_cell("A2", summary_text, 2)
+        + "</row>"
+    )
+    row_parts.append(
+        '<row r="3" ht="22" customHeight="1">'
+        + build_xlsx_inline_cell("A3", f"导出时间：{exported_at}", 2)
+        + "</row>"
+    )
+
+    header_cells = []
+    for idx, column in enumerate(columns, start=1):
+        header_cells.append(build_xlsx_inline_cell(f"{excel_column_name(idx)}4", column, 3))
+    row_parts.append('<row r="4" ht="26" customHeight="1">' + "".join(header_cells) + "</row>")
+
+    for row_index, (row, level) in enumerate(
+        zip(export_df.itertuples(index=False), risk_levels), start=5
+    ):
+        style_id = RISK_LEVEL_META.get(level, {}).get("style", 0)
+        data_cells = []
+        for col_index, value in enumerate(row, start=1):
+            cell_ref = f"{excel_column_name(col_index)}{row_index}"
+            data_cells.append(build_xlsx_inline_cell(cell_ref, value, style_id))
+        row_parts.append(
+            f'<row r="{row_index}" ht="24" customHeight="1">{"".join(data_cells)}</row>'
+        )
+
+    merge_cell_parts = [
+        f'<mergeCell ref="A1:{last_col}1"/>',
+        f'<mergeCell ref="A2:{last_col}2"/>',
+        f'<mergeCell ref="A3:{last_col}3"/>',
+    ]
+    for start_row, end_row, column_idx in merge_ranges:
+        col_name = excel_column_name(column_idx)
+        merge_cell_parts.append(f'<mergeCell ref="{col_name}{start_row}:{col_name}{end_row}"/>')
+    merge_refs = f'<mergeCells count="{len(merge_cell_parts)}">{"".join(merge_cell_parts)}</mergeCells>'
+
+    col_count = len(columns)
+    column_widths = [14] * col_count
+    cols_xml = "".join(
+        f'<col min="{idx}" max="{idx}" width="{w}" customWidth="1"/>'
+        for idx, w in enumerate(column_widths, start=1)
+    )
+
+    sheet_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:{last_col}{last_row}"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="22"/>
+  <cols>{cols_xml}</cols>
+  <sheetData>{"".join(row_parts)}</sheetData>
+  <autoFilter ref="A4:{last_col}{last_row}"/>
+  {merge_refs}
+  <pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.2" footer="0.2"/>
+</worksheet>
+"""
+
+    created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    core_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:creator>Codex</dc:creator>
+  <cp:lastModifiedBy>Codex</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">{created_at}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">{created_at}</dcterms:modified>
+</cp:coreProperties>
+"""
+
+    app_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Microsoft Excel</Application>
+</Properties>
+"""
+
+    with ZipFile(output, "w", ZIP_DEFLATED) as workbook:
+        workbook.writestr("[Content_Types].xml", CONTENT_TYPES_XML)
+        workbook.writestr("_rels/.rels", RELS_XML)
+        workbook.writestr("docProps/core.xml", core_xml)
+        workbook.writestr("docProps/app.xml", app_xml)
+        workbook.writestr("xl/workbook.xml", WORKBOOK_XML.replace("筛选结果", "重点人车辆"))
+        workbook.writestr("xl/_rels/workbook.xml.rels", WORKBOOK_RELS_XML)
+        workbook.writestr("xl/styles.xml", STYLES_XML)
+        workbook.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+    output.seek(0)
+    return output
     """在 DataFrame 中根据候选列表找到匹配的列名。"""
     normalized = {col: normalize_text_value(col).lower() for col in df.columns}
     for cand in candidates:
@@ -1524,6 +2036,121 @@ def delete_checkpoints_from_library(data_id):
     return redirect(url_for("review", data_id=data_id))
 
 
+@app.route("/keyperson/upload", methods=["POST"])
+def upload_keyperson():
+    """从上传页导入重点人 Excel 到本地重点人库。"""
+    file = request.files.get("keyperson_file")
+    if not file or not file.filename:
+        flash("请选择要上传的重点人 Excel 文件。")
+        return redirect(url_for("upload_form"))
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        flash("仅支持 .xls 和 .xlsx 格式。")
+        return redirect(url_for("upload_form"))
+
+    filepath = save_uploaded_excel(file)
+    try:
+        new_persons = parse_keyperson_excel(filepath)
+    except ValueError as exc:
+        flash(str(exc))
+        return redirect(url_for("upload_form"))
+    except Exception:
+        flash("重点人文件解析失败，请检查格式。")
+        return redirect(url_for("upload_form"))
+    finally:
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+
+    if not new_persons:
+        flash("未从文件中识别到有效的重点人数据。")
+        return redirect(url_for("upload_form"))
+
+    existing = load_keyperson_library()
+    existing_plates = {p["plate"] for p in existing}
+    added = [p for p in new_persons if p["plate"] not in existing_plates]
+    save_keyperson_library(existing + new_persons)
+    flash(f"成功导入 {len(added)} 名新重点人（共 {len(existing) + len(added)} 名，重复已合并）。")
+    return redirect(url_for("upload_form"))
+
+
+@app.route("/keyperson/import/<data_id>", methods=["POST"])
+def import_keyperson_from_excel(data_id):
+    """从配置页上传重点人 Excel 导入本地重点人库。"""
+    data = DATA_STORE.get(data_id)
+    if not data:
+        flash("数据已过期或不存在，请重新上传文件。")
+        return redirect(url_for("upload_form"))
+
+    file = request.files.get("keyperson_file")
+    if not file or not file.filename:
+        flash("请选择要上传的重点人 Excel 文件。")
+        return redirect(url_for("review", data_id=data_id))
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        flash("仅支持 .xls 和 .xlsx 格式。")
+        return redirect(url_for("review", data_id=data_id))
+
+    filepath = save_uploaded_excel(file)
+    try:
+        new_persons = parse_keyperson_excel(filepath)
+    except ValueError as exc:
+        flash(str(exc))
+        return redirect(url_for("review", data_id=data_id))
+    except Exception:
+        flash("重点人文件解析失败，请检查格式。")
+        return redirect(url_for("review", data_id=data_id))
+    finally:
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+
+    if not new_persons:
+        flash("未从文件中识别到有效的重点人数据。")
+        return redirect(url_for("review", data_id=data_id))
+
+    existing = load_keyperson_library()
+    existing_plates = {p["plate"] for p in existing}
+    added = [p for p in new_persons if p["plate"] not in existing_plates]
+    save_keyperson_library(existing + new_persons)
+
+    _touch_session(data_id)
+    flash(f"成功导入 {len(added)} 名新重点人（共 {len(existing) + len(added)} 名，重复已合并）。")
+    return redirect(url_for("review", data_id=data_id))
+
+
+@app.route("/keyperson/delete/<data_id>", methods=["POST"])
+def delete_keypersons_from_library(data_id):
+    """从本地重点人库中删除选中条目。"""
+    data = DATA_STORE.get(data_id)
+    if not data:
+        flash("数据已过期或不存在，请重新上传文件。")
+        return redirect(url_for("upload_form"))
+
+    selected_plates = set(normalize_choice_list(request.form.getlist("delete_keypersons")))
+    if not selected_plates:
+        flash("未选择要删除的重点人。")
+        return redirect(url_for("review", data_id=data_id))
+
+    existing = load_keyperson_library()
+    updated = [p for p in existing if p["plate"] not in selected_plates]
+    save_keyperson_library(updated)
+
+    # 同步清理配置中的已删除重点人
+    config = data.get("config", {})
+    kp_selected = config.get("keyperson_selected", [])
+    config["keyperson_selected"] = [p for p in kp_selected if p not in selected_plates]
+    data["config"] = config
+
+    _touch_session(data_id)
+    flash(f"已删除 {len(selected_plates)} 名重点人，本地重点人库剩余 {len(updated)} 名。")
+    return redirect(url_for("review", data_id=data_id))
+
+
 @app.route("/review/<data_id>", methods=["GET"])
 def review(data_id):
     """展示卡口库与筛选条件配置页面。"""
@@ -1534,7 +2161,7 @@ def review(data_id):
 
     config = data.get("config", {})
     filter_mode = normalize_text_value(config.get("filter_mode", FILTER_MODE_PAIR)).lower()
-    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT}:
+    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT, FILTER_MODE_KEYPERSON}:
         filter_mode = FILTER_MODE_PAIR
 
     start_time_value = normalize_text_value(config.get("start_time")) or data.get(
@@ -1617,6 +2244,35 @@ def review(data_id):
     if target_minutes_value <= 0:
         target_minutes_value = float(data.get("default_max_minutes", 30))
 
+    # 重点人模式配置
+    keyperson_library = load_keyperson_library()
+    keyperson_start_clock_value = normalize_text_value(
+        config.get("keyperson_start_clock", DEFAULT_FREQUENT_START_CLOCK)
+    ) or DEFAULT_FREQUENT_START_CLOCK
+    keyperson_end_clock_value = normalize_text_value(
+        config.get("keyperson_end_clock", DEFAULT_FREQUENT_END_CLOCK)
+    ) or DEFAULT_FREQUENT_END_CLOCK
+    keyperson_start_hour_value, keyperson_start_minute_value = split_clock_value(
+        keyperson_start_clock_value, default_hour="00", default_minute="00"
+    )
+    keyperson_end_hour_value, keyperson_end_minute_value = split_clock_value(
+        keyperson_end_clock_value, default_hour="23", default_minute="59"
+    )
+    selected_keyperson_checkpoints = normalize_choice_list(
+        config.get("keyperson_checkpoints", []), checkpoint_library
+    )
+    selected_keypersons = normalize_choice_list(
+        config.get("keyperson_selected", []),
+        [p["plate"] for p in keyperson_library],
+    )
+    keyperson_min_occurrence = config.get("keyperson_min_occurrence", DEFAULT_KEYPERSON_MIN_OCCURRENCE)
+    try:
+        keyperson_min_occurrence = int(keyperson_min_occurrence)
+    except (TypeError, ValueError):
+        keyperson_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+    if keyperson_min_occurrence <= 0:
+        keyperson_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+
     _touch_session(data_id)
     return render_template(
         "review.html",
@@ -1645,6 +2301,16 @@ def review(data_id):
         matched_checkpoints=matched_checkpoints,
         source_columns=source_columns,
         selected_import_column=selected_import_column,
+        keyperson_library=keyperson_library,
+        selected_keyperson_checkpoints=selected_keyperson_checkpoints,
+        selected_keypersons=selected_keypersons,
+        keyperson_min_occurrence=keyperson_min_occurrence,
+        keyperson_start_clock_value=keyperson_start_clock_value,
+        keyperson_end_clock_value=keyperson_end_clock_value,
+        keyperson_start_hour_value=keyperson_start_hour_value,
+        keyperson_start_minute_value=keyperson_start_minute_value,
+        keyperson_end_hour_value=keyperson_end_hour_value,
+        keyperson_end_minute_value=keyperson_end_minute_value,
     )
 
 
@@ -1669,7 +2335,7 @@ def filter_results(data_id):
         df = df[~df["plate_type"].isin(exclude_plate_types)]
 
     filter_mode = normalize_text_value(request.form.get("filter_mode", FILTER_MODE_PAIR)).lower()
-    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT}:
+    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT, FILTER_MODE_KEYPERSON}:
         filter_mode = FILTER_MODE_PAIR
 
     config.update(
@@ -1751,6 +2417,94 @@ def filter_results(data_id):
 
         return redirect(url_for("show_results", data_id=data_id))
 
+    elif filter_mode == FILTER_MODE_KEYPERSON:
+        # 重点人模式
+        kp_selected_checkpoints = normalize_choice_list(
+            request.form.getlist("keyperson_checkpoints"), checkpoint_library
+        )
+        if not kp_selected_checkpoints:
+            flash("请至少选择一个卡口用于重点人筛选。")
+            return redirect(url_for("review", data_id=data_id))
+
+        kp_active_checkpoints = sorted(set(kp_selected_checkpoints).intersection(current_data_locations))
+        if not kp_active_checkpoints:
+            flash("所选卡口未出现在当前通行数据中，请重新选择。")
+            return redirect(url_for("review", data_id=data_id))
+
+        kp_selected_plates = request.form.getlist("keyperson_selected")
+        keyperson_library = load_keyperson_library()
+        keyperson_lookup = {}
+        for person in keyperson_library:
+            plate = normalize_text_value(person.get("plate"))
+            if plate and plate in kp_selected_plates:
+                keyperson_lookup[plate] = person
+        if not keyperson_lookup:
+            flash("请至少选择一个重点人。")
+            return redirect(url_for("review", data_id=data_id))
+
+        kp_min_occurrence = request.form.get("keyperson_min_occurrence", type=int)
+        if kp_min_occurrence is None:
+            kp_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+        if kp_min_occurrence <= 0:
+            kp_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+
+        kp_start_clock_str = normalize_text_value(request.form.get("keyperson_start_clock"))
+        kp_end_clock_str = normalize_text_value(request.form.get("keyperson_end_clock"))
+        if not kp_start_clock_str:
+            kp_start_clock_str = compose_clock_value(
+                request.form.get("keyperson_start_hour"),
+                request.form.get("keyperson_start_minute"),
+            )
+        if not kp_end_clock_str:
+            kp_end_clock_str = compose_clock_value(
+                request.form.get("keyperson_end_hour"),
+                request.form.get("keyperson_end_minute"),
+            )
+        try:
+            kp_start_clock, kp_end_clock = parse_clock_window(kp_start_clock_str, kp_end_clock_str)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("review", data_id=data_id))
+
+        selected_export_columns = normalize_choice_list(
+            request.form.getlist("export_columns"), source_columns
+        )
+        if not selected_export_columns:
+            selected_export_columns = pick_default_export_columns(source_columns)
+
+        filtered_df, matched_records, filtered_vehicle_count = build_keyperson_filtered_dataframe(
+            df=df,
+            start_clock=kp_start_clock,
+            end_clock=kp_end_clock,
+            active_checkpoints=kp_active_checkpoints,
+            keyperson_lookup=keyperson_lookup,
+            min_occurrence=kp_min_occurrence,
+        )
+        summary = build_keyperson_results_summary(
+            filtered_df, matched_records=matched_records, threshold=kp_min_occurrence,
+        )
+        summary["total_persons"] = filtered_vehicle_count
+        _save_df(filtered_df, data_id, "filtered_data")
+        del df, filtered_df
+
+        config.update({
+            "keyperson_checkpoints": kp_selected_checkpoints,
+            "keyperson_selected": list(keyperson_lookup.keys()),
+            "keyperson_min_occurrence": kp_min_occurrence,
+            "keyperson_start_clock": kp_start_clock.strftime("%H:%M"),
+            "keyperson_end_clock": kp_end_clock.strftime("%H:%M"),
+            "export_columns": selected_export_columns,
+        })
+
+        DATA_STORE[data_id]["config"] = config
+        DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_KEYPERSON
+        DATA_STORE[data_id]["summary"] = summary
+        DATA_STORE[data_id]["selected_export_columns"] = selected_export_columns
+        DATA_STORE[data_id]["last_access"] = time.time()
+
+        return redirect(url_for("show_results", data_id=data_id))
+
+    # 频繁模式
     selected_checkpoints = normalize_choice_list(
         request.form.getlist("frequent_checkpoints"), checkpoint_library
     )
@@ -1849,6 +2603,12 @@ def show_results(data_id):
     if filter_mode == FILTER_MODE_PAIR:
         filtered_df = _restore_pair_dtypes(filtered_df)
         display_results = build_pair_display_results(filtered_df)
+    elif filter_mode == FILTER_MODE_KEYPERSON:
+        filtered_df = _restore_keyperson_dtypes(filtered_df)
+        export_cols = selected_export_columns or config.get("export_columns", [])
+        display_results = build_keyperson_display_results(
+            filtered_df, selected_export_columns=export_cols,
+        )
     else:
         filtered_df = _restore_frequent_dtypes(filtered_df)
         threshold = config.get("min_occurrence", DEFAULT_FREQUENT_OCCURRENCE)
@@ -1926,6 +2686,26 @@ def download(data_id):
             export_df, risk_levels, frequent_summary, merge_ranges,
         )
         filename = "频繁出现车辆筛选结果.xlsx"
+    elif filter_mode == FILTER_MODE_KEYPERSON:
+        filtered_df = _restore_keyperson_dtypes(filtered_df)
+        source_columns = data.get("source_columns", [])
+        selected_export_columns = normalize_choice_list(
+            config.get("export_columns", []), source_columns
+        )
+        if not selected_export_columns:
+            selected_export_columns = pick_default_export_columns(source_columns)
+
+        export_df, merge_ranges, risk_levels = build_keyperson_export_dataframe(
+            filtered_df, selected_export_columns,
+        )
+        kp_summary = data.get("summary") or build_keyperson_results_summary(
+            filtered_df, matched_records=len(filtered_df),
+            threshold=config.get("keyperson_min_occurrence", DEFAULT_KEYPERSON_MIN_OCCURRENCE),
+        )
+        output = build_keyperson_warning_workbook(
+            export_df, risk_levels, kp_summary, merge_ranges,
+        )
+        filename = "重点人车辆筛选结果.xlsx"
     else:
         filtered_df = _restore_pair_dtypes(filtered_df)
         export_df, risk_levels = build_export_dataframe(filtered_df)

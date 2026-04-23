@@ -74,6 +74,31 @@
       <small>卡口库已保存在本机，后续重新打开工具也可继续使用。</small>
     </section>
   {% endif %}
+
+  <section class="section-card">
+    <div class="section-title">上传重点人数据（可选）</div>
+    <div class="section-hint">上传包含姓名、身份证、手机号、车牌号的 Excel 文件，系统会自动识别并导入到本地重点人库。可在配置页的"重点人模式"中使用。</div>
+
+    <form action="{{ url_for('upload_keyperson') }}" method="post" enctype="multipart/form-data">
+      <div class="file-picker">
+        <input type="file" name="keyperson_file" accept=".xls,.xlsx" required class="file-input-native" data-keyperson-upload>
+        <div class="file-picker-main">
+          <button type="button" class="file-trigger" data-keyperson-upload-trigger>选择重点人 Excel</button>
+          <div class="file-meta" data-keyperson-upload-meta>未选择文件</div>
+        </div>
+      </div>
+      <small>建议表头包含：姓名 / 身份证 / 手机 / 车牌号。车牌号为必需列。</small>
+
+      <div class="action-strip" style="margin-top: 14px;">
+        <div>
+          <button type="submit">导入重点人库</button>
+        </div>
+        <div class="toolbar-note">
+          重点人库保存在本机，可长期复用。重复车牌号会自动合并。
+        </div>
+      </div>
+    </form>
+  </section>
 {% endblock %}
 
 {% block extra_scripts %}
@@ -114,6 +139,21 @@
 
       input.addEventListener("change", renderFiles);
       renderFiles();
+    })();
+
+    // 重点人文件上传
+    (function () {
+      var input = document.querySelector("[data-keyperson-upload]");
+      var trigger = document.querySelector("[data-keyperson-upload-trigger]");
+      var meta = document.querySelector("[data-keyperson-upload-meta]");
+
+      if (!input || !trigger || !meta) return;
+
+      trigger.addEventListener("click", function () { input.click(); });
+      input.addEventListener("change", function () {
+        var files = Array.from(input.files || []);
+        meta.textContent = files.length ? "已选择：" + files.map(function(f) { return f.name; }).join("、") : "未选择文件";
+      });
     })();
   </script>
 {% endblock %}

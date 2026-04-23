@@ -284,6 +284,14 @@ def normalize_choice_list(values, allowed_values=None):
     return normalized
 
 
+def resolve_next_url(default_endpoint, **default_values):
+    """优先使用表单/查询参数中的站内回跳地址。"""
+    next_url = normalize_text_value(request.form.get("next") or request.args.get("next"))
+    if next_url.startswith("/") and not next_url.startswith("//"):
+        return next_url
+    return url_for(default_endpoint, **default_values)
+
+
 def normalize_excel_headers(columns):
     """标准化 Excel 表头，空列名补全并保证唯一。"""
     normalized = []
@@ -416,6 +424,32 @@ def compose_clock_value(hour_text, minute_text):
 def clock_to_minutes(clock_value):
     """将时分秒转为分钟（向下取整到分钟）。"""
     return clock_value.hour * 60 + clock_value.minute
+
+
+def is_minutes_in_clock_window(minutes, start_minutes, end_minutes):
+    """判断分钟值是否落在日内时段内（支持跨天）。"""
+    if pd.isna(minutes):
+        return False
+    if start_minutes <= end_minutes:
+        return start_minutes <= minutes <= end_minutes
+    return minutes >= start_minutes or minutes <= end_minutes
+
+
+def filter_dataframe_by_clock_window(df, datetime_column, start_clock, end_clock):
+    """按日内时段过滤 DataFrame 指定时间列（支持跨天）。"""
+    if df is None or df.empty:
+        return df
+    if datetime_column not in df.columns:
+        return df
+
+    start_minutes = clock_to_minutes(start_clock)
+    end_minutes = clock_to_minutes(end_clock)
+    time_series = pd.to_datetime(df[datetime_column], errors="coerce")
+    minutes = time_series.dt.hour * 60 + time_series.dt.minute
+    mask = minutes.apply(
+        lambda value: is_minutes_in_clock_window(value, start_minutes, end_minutes)
+    )
+    return df[mask].copy()
 
 
 def merge_distinct_values(values, limit=8):
@@ -919,15 +953,10 @@ def build_keyperson_filtered_dataframe(
     df_valid = df[df["location"].isin(set(active_checkpoints))].copy()
     df_valid = df_valid[df_valid["plate"].isin(keyperson_plates)]
 
-    start_minutes = clock_to_minutes(start_clock)
-    end_minutes = clock_to_minutes(end_clock)
-    clock_minutes = df_valid["time"].dt.hour * 60 + df_valid["time"].dt.minute
-    if start_minutes <= end_minutes:
-        time_mask = (clock_minutes >= start_minutes) & (clock_minutes <= end_minutes)
-    else:
-        time_mask = (clock_minutes >= start_minutes) | (clock_minutes <= end_minutes)
-
-    df_valid = df_valid[time_mask]
+    # 严格按日内时段过滤，确保结果明细只包含时段内记录
+    df_valid = filter_dataframe_by_clock_window(
+        df_valid, "time", start_clock, end_clock
+    )
     df_valid = df_valid.sort_values("time")
     matched_records = int(len(df_valid))
 
@@ -1179,8 +1208,55 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
     return display_results
 
 
+def paginate_grouped_results_by_rows(results, page, max_rows_per_page):
+    """按车辆组分页，优先控制每页行数且不拆分同组记录。"""
+    if not results:
+        return [], 1, False, False
+
+    total_rows = len(results)
+    group_starts = [i for i, row in enumerate(results) if row.get("group_first")]
+    if not group_starts:
+        return [], 1, False, False
+
+    group_ranges = []
+    for idx, start in enumerate(group_starts):
+        end = group_starts[idx + 1] if idx + 1 < len(group_starts) else total_rows
+        group_ranges.append((start, end))
+
+    row_limit = max(1, int(max_rows_per_page or 1))
+    pages = []
+    page_start = None
+    page_end = None
+    page_rows = 0
+
+    for start, end in group_ranges:
+        group_rows = end - start
+        if page_start is None:
+            page_start = start
+            page_end = end
+            page_rows = group_rows
+            continue
+
+        if page_rows + group_rows > row_limit:
+            pages.append((page_start, page_end))
+            page_start = start
+            page_end = end
+            page_rows = group_rows
+        else:
+            page_end = end
+            page_rows += group_rows
+
+    if page_start is not None:
+        pages.append((page_start, page_end))
+
+    total_pages = max(1, len(pages))
+    page = max(1, min(page, total_pages))
+    start_row, end_row = pages[page - 1]
+    return results[start_row:end_row], total_pages, page > 1, page < total_pages
+
+
 def paginate_results(results, page, filter_mode):
-    """对结果列表分页，频繁模式按车辆组边界切割避免断行。"""
+    """对结果列表分页。"""
     if not results:
         return [], 1, False, False
 
@@ -1193,7 +1269,11 @@ def paginate_results(results, page, filter_mode):
         end = min(start + PAGE_SIZE, total)
         return results[start:end], total_pages, page > 1, page < total_pages
 
-    # 频繁/重点人模式：按车辆组边界分页
+    if filter_mode == FILTER_MODE_KEYPERSON:
+        # 重点人模式按“组边界 + 行数上限”分页，避免单页过长
+        return paginate_grouped_results_by_rows(results, page, PAGE_SIZE)
+
+    # 频繁模式：按车辆组边界分页（按车辆组数计页）
     group_starts = [i for i, r in enumerate(results) if r.get("group_first")]
     total_groups = len(group_starts)
     if total_groups == 0:
@@ -2014,11 +2094,18 @@ def upload_form():
     """上传页面。"""
     checkpoint_library = load_checkpoint_library()
     matched_home_checkpoints = checkpoint_library[:12]
+    keyperson_library = load_keyperson_library()
+    session_history = _load_session_history()
+    latest_session_id = ""
+    if session_history:
+        latest_session_id = normalize_text_value(session_history[0].get("data_id", ""))
     return render_template(
         "upload.html",
         checkpoint_library=checkpoint_library,
         matched_home_checkpoints=matched_home_checkpoints,
-        session_history=_load_session_history(),
+        keyperson_count=len(keyperson_library),
+        session_history=session_history,
+        latest_session_id=latest_session_id,
     )
 
 
@@ -2131,9 +2218,88 @@ def upload():
     return redirect(url_for("review", data_id=data_id))
 
 
+@app.route("/library/checkpoints", methods=["GET"])
+def checkpoint_library_page():
+    """卡口库导入与管理页面。"""
+    requested_data_id = normalize_text_value(request.args.get("data_id", ""))
+    data_id = requested_data_id
+    data = None
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            flash("数据会话已过期，已为你打开通用卡口库管理页面。")
+            data_id = ""
+
+    checkpoint_library = load_checkpoint_library()
+    source_columns = []
+    selected_import_column = ""
+    matched_checkpoints = []
+    prioritized_checkpoint_library = checkpoint_library
+
+    if data:
+        source_columns = data.get("source_columns", [])
+        selected_import_column = data.get("last_imported_checkpoint_column", "")
+        if not selected_import_column and source_columns:
+            selected_import_column = source_columns[0]
+
+        current_locations = data.get("locations", [])
+        matched_checkpoints = sorted(set(current_locations).intersection(checkpoint_library))
+        matched_set = set(matched_checkpoints)
+        prioritized_checkpoint_library = matched_checkpoints + [
+            checkpoint
+            for checkpoint in checkpoint_library
+            if checkpoint not in matched_set
+        ]
+        _touch_session(data_id)
+
+    return render_template(
+        "checkpoint_library.html",
+        data_id=data_id,
+        has_active_session=bool(data_id),
+        checkpoint_library=checkpoint_library,
+        prioritized_checkpoint_library=prioritized_checkpoint_library,
+        matched_checkpoints=matched_checkpoints,
+        source_columns=source_columns,
+        selected_import_column=selected_import_column,
+        self_url=url_for("checkpoint_library_page", data_id=data_id) if data_id else url_for("checkpoint_library_page"),
+    )
+
+
+@app.route("/library/keypersons", methods=["GET"])
+def keyperson_library_page():
+    """重点人导入与管理页面。"""
+    requested_data_id = normalize_text_value(request.args.get("data_id", ""))
+    data_id = requested_data_id
+    data = None
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            flash("数据会话已过期，已为你打开通用重点人库管理页面。")
+            data_id = ""
+
+    keyperson_library = load_keyperson_library()
+    selected_keypersons = []
+    if data:
+        selected_keypersons = normalize_choice_list(
+            data.get("config", {}).get("keyperson_selected", []),
+            [p["plate"] for p in keyperson_library],
+        )
+        _touch_session(data_id)
+
+    return render_template(
+        "keyperson_library.html",
+        data_id=data_id,
+        has_active_session=bool(data_id),
+        keyperson_library=keyperson_library,
+        selected_keypersons=selected_keypersons,
+        self_url=url_for("keyperson_library_page", data_id=data_id) if data_id else url_for("keyperson_library_page"),
+    )
+
+
 @app.route("/checkpoint/import/uploaded/<data_id>", methods=["POST"])
 def import_checkpoint_from_uploaded(data_id):
     """从本次已上传通行记录中，按选择列导入卡口库。"""
+    next_url = resolve_next_url("review", data_id=data_id)
     data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
@@ -2142,7 +2308,7 @@ def import_checkpoint_from_uploaded(data_id):
     column_name = request.form.get("checkpoint_source_column", "").strip()
     if not column_name:
         flash("请选择要导入的卡口列。")
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
 
     source_columns = data.get("source_columns", [])
     try:
@@ -2157,7 +2323,7 @@ def import_checkpoint_from_uploaded(data_id):
         )
     except ValueError as exc:
         flash(str(exc))
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
 
     existing_checkpoints = load_checkpoint_library()
     merged_checkpoints = save_checkpoint_library(existing_checkpoints + imported_checkpoints)
@@ -2169,16 +2335,25 @@ def import_checkpoint_from_uploaded(data_id):
     flash(
         f"已从'{column_name}'导入卡口，识别 {len(imported_checkpoints)} 个卡口，新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
     )
-    return redirect(url_for("review", data_id=data_id))
+    return redirect(next_url)
 
 
+@app.route("/checkpoint/delete", methods=["POST"])
 @app.route("/checkpoint/delete/<data_id>", methods=["POST"])
-def delete_checkpoints_from_library(data_id):
+def delete_checkpoints_from_library(data_id=None):
     """从本地卡口库删除选中的卡口。"""
-    data = _get_or_restore_session(data_id)
-    if not data:
-        flash("数据已过期或不存在，请重新上传文件。")
-        return redirect(url_for("upload_form"))
+    data = None
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            flash("数据已过期或不存在，请重新上传文件。")
+            return redirect(url_for("upload_form"))
+
+    next_url = (
+        resolve_next_url("review", data_id=data_id)
+        if data_id
+        else resolve_next_url("checkpoint_library_page")
+    )
 
     checkpoint_library = load_checkpoint_library()
     selected_checkpoints = normalize_choice_list(
@@ -2187,7 +2362,7 @@ def delete_checkpoints_from_library(data_id):
     )
     if not selected_checkpoints:
         flash("请先选择要删除的卡口。")
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
 
     removed_set = set(selected_checkpoints)
     remaining_checkpoints = [
@@ -2195,39 +2370,41 @@ def delete_checkpoints_from_library(data_id):
     ]
     updated_library = save_checkpoint_library(remaining_checkpoints)
 
-    config = data.get("config", {})
-    data["config"] = prune_removed_checkpoints_from_config(config, selected_checkpoints)
+    if data:
+        config = data.get("config", {})
+        data["config"] = prune_removed_checkpoints_from_config(config, selected_checkpoints)
+        _touch_session(data_id)
+        _save_metadata(data_id)
 
-    _touch_session(data_id)
-    _save_metadata(data_id)
     flash(
         f"已删除 {len(selected_checkpoints)} 个卡口，本地卡口库剩余 {len(updated_library)} 个。"
     )
-    return redirect(url_for("review", data_id=data_id))
+    return redirect(next_url)
 
 
 @app.route("/keyperson/upload", methods=["POST"])
 def upload_keyperson():
     """从上传页导入重点人 Excel 到本地重点人库。"""
+    next_url = resolve_next_url("upload_form")
     file = request.files.get("keyperson_file")
     if not file or not file.filename:
         flash("请选择要上传的重点人 Excel 文件。")
-        return redirect(url_for("upload_form"))
+        return redirect(next_url)
 
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in ALLOWED_EXTENSIONS:
         flash("仅支持 .xls 和 .xlsx 格式。")
-        return redirect(url_for("upload_form"))
+        return redirect(next_url)
 
     filepath = save_uploaded_excel(file)
     try:
         new_persons = parse_keyperson_excel(filepath)
     except ValueError as exc:
         flash(str(exc))
-        return redirect(url_for("upload_form"))
+        return redirect(next_url)
     except Exception:
         flash("重点人文件解析失败，请检查格式。")
-        return redirect(url_for("upload_form"))
+        return redirect(next_url)
     finally:
         try:
             os.remove(filepath)
@@ -2236,19 +2413,20 @@ def upload_keyperson():
 
     if not new_persons:
         flash("未从文件中识别到有效的重点人数据。")
-        return redirect(url_for("upload_form"))
+        return redirect(next_url)
 
     existing = load_keyperson_library()
     existing_plates = {p["plate"] for p in existing}
     added = [p for p in new_persons if p["plate"] not in existing_plates]
     save_keyperson_library(existing + new_persons)
     flash(f"成功导入 {len(added)} 名新重点人（共 {len(existing) + len(added)} 名，重复已合并）。")
-    return redirect(url_for("upload_form"))
+    return redirect(next_url)
 
 
 @app.route("/keyperson/import/<data_id>", methods=["POST"])
 def import_keyperson_from_excel(data_id):
     """从配置页上传重点人 Excel 导入本地重点人库。"""
+    next_url = resolve_next_url("review", data_id=data_id)
     data = _get_or_restore_session(data_id)
     if not data:
         flash("数据已过期或不存在，请重新上传文件。")
@@ -2257,22 +2435,22 @@ def import_keyperson_from_excel(data_id):
     file = request.files.get("keyperson_file")
     if not file or not file.filename:
         flash("请选择要上传的重点人 Excel 文件。")
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
 
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in ALLOWED_EXTENSIONS:
         flash("仅支持 .xls 和 .xlsx 格式。")
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
 
     filepath = save_uploaded_excel(file)
     try:
         new_persons = parse_keyperson_excel(filepath)
     except ValueError as exc:
         flash(str(exc))
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
     except Exception:
         flash("重点人文件解析失败，请检查格式。")
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
     finally:
         try:
             os.remove(filepath)
@@ -2281,7 +2459,7 @@ def import_keyperson_from_excel(data_id):
 
     if not new_persons:
         flash("未从文件中识别到有效的重点人数据。")
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
 
     existing = load_keyperson_library()
     existing_plates = {p["plate"] for p in existing}
@@ -2290,36 +2468,47 @@ def import_keyperson_from_excel(data_id):
 
     _touch_session(data_id)
     flash(f"成功导入 {len(added)} 名新重点人（共 {len(existing) + len(added)} 名，重复已合并）。")
-    return redirect(url_for("review", data_id=data_id))
+    return redirect(next_url)
 
 
+@app.route("/keyperson/delete", methods=["POST"])
 @app.route("/keyperson/delete/<data_id>", methods=["POST"])
-def delete_keypersons_from_library(data_id):
+def delete_keypersons_from_library(data_id=None):
     """从本地重点人库中删除选中条目。"""
-    data = _get_or_restore_session(data_id)
-    if not data:
-        flash("数据已过期或不存在，请重新上传文件。")
-        return redirect(url_for("upload_form"))
+    data = None
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            flash("数据已过期或不存在，请重新上传文件。")
+            return redirect(url_for("upload_form"))
+
+    next_url = (
+        resolve_next_url("review", data_id=data_id)
+        if data_id
+        else resolve_next_url("keyperson_library_page")
+    )
 
     selected_plates = set(normalize_choice_list(request.form.getlist("delete_keypersons")))
     if not selected_plates:
         flash("未选择要删除的重点人。")
-        return redirect(url_for("review", data_id=data_id))
+        return redirect(next_url)
 
     existing = load_keyperson_library()
     updated = [p for p in existing if p["plate"] not in selected_plates]
     save_keyperson_library(updated)
 
-    # 同步清理配置中的已删除重点人
-    config = data.get("config", {})
-    kp_selected = config.get("keyperson_selected", [])
-    config["keyperson_selected"] = [p for p in kp_selected if p not in selected_plates]
-    data["config"] = config
+    if data:
+        # 同步清理配置中的已删除重点人
+        config = data.get("config", {})
+        kp_selected = config.get("keyperson_selected", [])
+        config["keyperson_selected"] = [p for p in kp_selected if p not in selected_plates]
+        data["config"] = config
 
-    _touch_session(data_id)
-    _save_metadata(data_id)
+        _touch_session(data_id)
+        _save_metadata(data_id)
+
     flash(f"已删除 {len(selected_plates)} 名重点人，本地重点人库剩余 {len(updated)} 名。")
-    return redirect(url_for("review", data_id=data_id))
+    return redirect(next_url)
 
 
 @app.route("/review/<data_id>", methods=["GET"])
@@ -2782,6 +2971,36 @@ def show_results(data_id):
         display_results = build_pair_display_results(filtered_df)
     elif filter_mode == FILTER_MODE_KEYPERSON:
         filtered_df = _restore_keyperson_dtypes(filtered_df)
+        start_clock_str = normalize_text_value(
+            config.get("keyperson_start_clock", DEFAULT_FREQUENT_START_CLOCK)
+        ) or DEFAULT_FREQUENT_START_CLOCK
+        end_clock_str = normalize_text_value(
+            config.get("keyperson_end_clock", DEFAULT_FREQUENT_END_CLOCK)
+        ) or DEFAULT_FREQUENT_END_CLOCK
+        try:
+            start_clock, end_clock = parse_clock_window(start_clock_str, end_clock_str)
+            filtered_df = filter_dataframe_by_clock_window(
+                filtered_df, "event_time", start_clock, end_clock
+            )
+        except ValueError:
+            # 配置异常时不阻断展示，继续沿用已筛选结果
+            pass
+
+        threshold = config.get("keyperson_min_occurrence", DEFAULT_KEYPERSON_MIN_OCCURRENCE)
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+        if threshold <= 0:
+            threshold = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+
+        summary = build_keyperson_results_summary(
+            filtered_df,
+            matched_records=len(filtered_df),
+            threshold=threshold,
+        )
+        summary["total_persons"] = int(filtered_df["plate"].nunique()) if "plate" in filtered_df.columns else 0
+
         export_cols = selected_export_columns or config.get("export_columns", [])
         display_results = build_keyperson_display_results(
             filtered_df, selected_export_columns=export_cols,
@@ -2865,6 +3084,20 @@ def download(data_id):
         filename = "频繁出现车辆筛选结果.xlsx"
     elif filter_mode == FILTER_MODE_KEYPERSON:
         filtered_df = _restore_keyperson_dtypes(filtered_df)
+        start_clock_str = normalize_text_value(
+            config.get("keyperson_start_clock", DEFAULT_FREQUENT_START_CLOCK)
+        ) or DEFAULT_FREQUENT_START_CLOCK
+        end_clock_str = normalize_text_value(
+            config.get("keyperson_end_clock", DEFAULT_FREQUENT_END_CLOCK)
+        ) or DEFAULT_FREQUENT_END_CLOCK
+        try:
+            start_clock, end_clock = parse_clock_window(start_clock_str, end_clock_str)
+            filtered_df = filter_dataframe_by_clock_window(
+                filtered_df, "event_time", start_clock, end_clock
+            )
+        except ValueError:
+            pass
+
         source_columns = data.get("source_columns", [])
         selected_export_columns = normalize_choice_list(
             config.get("export_columns", []), source_columns
@@ -2875,10 +3108,19 @@ def download(data_id):
         export_df, merge_ranges, risk_levels = build_keyperson_export_dataframe(
             filtered_df, selected_export_columns,
         )
-        kp_summary = data.get("summary") or build_keyperson_results_summary(
-            filtered_df, matched_records=len(filtered_df),
-            threshold=config.get("keyperson_min_occurrence", DEFAULT_KEYPERSON_MIN_OCCURRENCE),
+        threshold = config.get("keyperson_min_occurrence", DEFAULT_KEYPERSON_MIN_OCCURRENCE)
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+        if threshold <= 0:
+            threshold = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+        kp_summary = build_keyperson_results_summary(
+            filtered_df,
+            matched_records=len(filtered_df),
+            threshold=threshold,
         )
+        kp_summary["total_persons"] = int(filtered_df["plate"].nunique()) if "plate" in filtered_df.columns else 0
         output = build_keyperson_warning_workbook(
             export_df, risk_levels, kp_summary, merge_ranges,
         )

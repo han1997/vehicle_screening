@@ -7,7 +7,7 @@
     <div class="hero-copy">
       <div class="step-badge">步骤 1 / 3 · 上传通行记录</div>
       <h2>先上传通行数据，再配置第一和第二卡口</h2>
-      <p class="subtext">卡口库导入已收缩为下一步中的小按钮。上传后可直接从通行记录中选择任意一列导入本地卡口库。</p>
+      <p class="subtext">卡口库导入/管理、重点人导入/管理已拆分到独立子页面。上传后可从“库管理入口”进入对应页面处理。</p>
     </div>
     <div class="info-grid">
       <div class="summary-card summary-card-soft">
@@ -46,7 +46,7 @@
 
       <div class="empty-note" style="margin-top: 16px;">
         <strong>进入第二步后可做什么</strong>
-        <p>点击“导入卡口库”按钮，可从本次上传数据任意一列导入本地卡口库，然后选择第一卡口和第二卡口进行筛选。</p>
+        <p>进入“卡口库导入与管理”页面后，可从本次上传数据任意一列导入本地卡口库，再返回配置页选择第一/第二卡口进行筛选。</p>
       </div>
 
       <div class="action-strip" style="margin-top: 14px;">
@@ -76,28 +76,32 @@
   {% endif %}
 
   <section class="section-card">
-    <div class="section-title">上传重点人数据（可选）</div>
-    <div class="section-hint">上传包含姓名、身份证、手机号、车牌号的 Excel 文件，系统会自动识别并导入到本地重点人库。可在配置页的"重点人模式"中使用。</div>
-
-    <form action="{{ url_for('upload_keyperson') }}" method="post" enctype="multipart/form-data">
-      <div class="file-picker">
-        <input type="file" name="keyperson_file" accept=".xls,.xlsx" required class="file-input-native" data-keyperson-upload>
-        <div class="file-picker-main">
-          <button type="button" class="file-trigger" data-keyperson-upload-trigger>选择重点人 Excel</button>
-          <div class="file-meta" data-keyperson-upload-meta>未选择文件</div>
-        </div>
+    <div class="section-title">库管理入口</div>
+    <div class="section-hint">卡口库导入/管理、重点人导入/管理已拆分到独立子页面。你可以先上传数据，再进入对应页面处理。</div>
+    <div class="summary-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0 0 14px;">
+      <div class="summary-card">
+        <div class="summary-label">本地卡口库</div>
+        <div class="summary-value">{{ checkpoint_library|length }}</div>
+        <div class="summary-note">支持删除、查看，若带会话可按列导入</div>
       </div>
-      <small>建议表头包含：姓名 / 身份证 / 手机 / 车牌号。车牌号为必需列。</small>
-
-      <div class="action-strip" style="margin-top: 14px;">
-        <div>
-          <button type="submit">导入重点人库</button>
-        </div>
-        <div class="toolbar-note">
-          重点人库保存在本机，可长期复用。重复车牌号会自动合并。
-        </div>
+      <div class="summary-card">
+        <div class="summary-label">重点人库</div>
+        <div class="summary-value">{{ keyperson_count }}</div>
+        <div class="summary-note">支持 Excel 导入、批量删除与复用</div>
       </div>
-    </form>
+    </div>
+    <div class="action-strip">
+      <div class="helper-inline">
+        <a
+          class="btn btn-ghost"
+          href="{% if latest_session_id %}{{ url_for('checkpoint_library_page', data_id=latest_session_id) }}{% else %}{{ url_for('checkpoint_library_page') }}{% endif %}"
+        >卡口库导入与管理</a>
+        <a class="btn btn-ghost" href="{{ url_for('keyperson_library_page') }}">重点人导入与管理</a>
+      </div>
+      <div class="toolbar-note">
+        若存在最近会话，卡口页会自动带入会话，可直接从当前数据按列导入卡口。
+      </div>
+    </div>
   </section>
 
   {% if session_history %}
@@ -171,21 +175,6 @@
 
       input.addEventListener("change", renderFiles);
       renderFiles();
-    })();
-
-    // 重点人文件上传
-    (function () {
-      var input = document.querySelector("[data-keyperson-upload]");
-      var trigger = document.querySelector("[data-keyperson-upload-trigger]");
-      var meta = document.querySelector("[data-keyperson-upload-meta]");
-
-      if (!input || !trigger || !meta) return;
-
-      trigger.addEventListener("click", function () { input.click(); });
-      input.addEventListener("change", function () {
-        var files = Array.from(input.files || []);
-        meta.textContent = files.length ? "已选择：" + files.map(function(f) { return f.name; }).join("、") : "未选择文件";
-      });
     })();
   </script>
 {% endblock %}

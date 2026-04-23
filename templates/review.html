@@ -43,59 +43,17 @@
   </div>
 
   <section class="section-card">
-    <div class="section-title">卡口库导入</div>
-    <div class="section-hint">按需从本次上传通行记录中选择一列导入本地卡口库，导入后可立即参与下方筛选。</div>
-    {% if source_columns %}
-      <form action="{{ url_for('import_checkpoint_from_uploaded', data_id=data_id) }}" method="post" class="helper-inline">
-        <label for="checkpoint_source_column" style="margin-bottom: 0;">导入列：</label>
-        <select name="checkpoint_source_column" id="checkpoint_source_column" style="max-width: 260px;">
-          {% for column in source_columns %}
-            <option value="{{ column }}" {% if selected_import_column == column %}selected{% endif %}>{{ column }}</option>
-          {% endfor %}
-        </select>
-        <button type="submit" class="btn btn-ghost btn-small">导入卡口库</button>
-      </form>
-    {% else %}
-      <div class="empty-note">
-        <strong>未识别到可导入列</strong>
-        <p>请返回首页重新上传通行记录文件。</p>
+    <div class="section-title">库管理入口</div>
+    <div class="section-hint">“卡口库导入 / 本地卡口库管理 / 重点人导入 / 重点人管理”已拆分为子页面，避免配置筛选页过长。</div>
+    <div class="action-strip">
+      <div class="helper-inline">
+        <a class="btn btn-ghost" href="{{ url_for('checkpoint_library_page', data_id=data_id) }}">卡口库导入与管理</a>
+        <a class="btn btn-ghost" href="{{ url_for('keyperson_library_page', data_id=data_id) }}">重点人导入与管理</a>
       </div>
-    {% endif %}
-  </section>
-
-  <section class="section-card">
-    <div class="section-title section-title-inline">
-      <span>本地卡口库管理</span>
-      <span class="selection-tag multi">多选删除</span>
+      <div class="toolbar-note">
+        在子页面完成导入或删除后，返回本页即可继续配置筛选参数。
+      </div>
     </div>
-    <div class="section-hint">用于处理误导入或冗余卡口。删除后会立即从本地卡口库移除。</div>
-    {% if checkpoint_library %}
-      <form action="{{ url_for('delete_checkpoints_from_library', data_id=data_id) }}" method="post">
-        <div class="checklist-panel checklist-panel-large">
-          <div class="checklist-grid">
-            {% for checkpoint in prioritized_checkpoint_library %}
-            <label class="check-item">
-              <input type="checkbox" name="delete_checkpoints" value="{{ checkpoint }}">
-              <span>{{ checkpoint }}</span>
-            </label>
-            {% endfor %}
-          </div>
-        </div>
-        <div class="action-strip" style="margin-top: 12px;">
-          <div>
-            <button type="submit" class="btn btn-ghost">删除选中卡口</button>
-          </div>
-          <div class="toolbar-note">
-            删除操作仅影响本地卡口库，不会改动本次上传的原始通行数据。
-          </div>
-        </div>
-      </form>
-    {% else %}
-      <div class="empty-note">
-        <strong>本地卡口库为空</strong>
-        <p>可先通过上方“卡口库导入”添加，再在此处管理。</p>
-      </div>
-    {% endif %}
   </section>
 
   {% if plate_types %}
@@ -117,45 +75,6 @@
     </div>
   </section>
   {% endif %}
-
-  <div data-mode-block="keyperson" style="display:none;">
-    <section class="section-card">
-      <div class="section-title">重点人库管理</div>
-      <div class="section-hint">上传包含姓名、身份证、手机、车牌号的 Excel 文件，导入后可在此管理。</div>
-      <form action="{{ url_for('import_keyperson_from_excel', data_id=data_id) }}" method="post" enctype="multipart/form-data" class="helper-inline">
-        <input type="file" name="keyperson_file" accept=".xls,.xlsx" required class="file-input-native">
-        <button type="button" class="file-trigger" data-keyperson-file-trigger>选择重点人 Excel</button>
-        <button type="submit" class="btn btn-ghost btn-small">导入重点人库</button>
-      </form>
-      {% if keyperson_library %}
-        <form action="{{ url_for('delete_keypersons_from_library', data_id=data_id) }}" method="post" style="margin-top: 14px;">
-          <div class="select-all-bar">
-            <button type="button" class="btn btn-ghost btn-small" data-select-all="delete_keypersons">全选</button>
-            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="delete_keypersons">取消全选</button>
-          </div>
-          <div class="checklist-panel">
-            <div class="checklist-grid">
-              {% for person in keyperson_library %}
-              <label class="check-item">
-                <input type="checkbox" name="delete_keypersons" value="{{ person.plate }}">
-                <span>{{ person.name or '未命名' }}（{{ person.plate }}）</span>
-              </label>
-              {% endfor %}
-            </div>
-          </div>
-          <div class="action-strip" style="margin-top: 8px;">
-            <button type="submit" class="btn btn-ghost">删除选中重点人</button>
-            <div class="toolbar-note">删除操作仅影响本地重点人库，不会改动通行数据。</div>
-          </div>
-        </form>
-      {% else %}
-        <div class="empty-note" style="margin-top: 12px;">
-          <strong>本地重点人库为空</strong>
-          <p>请先上传重点人 Excel 文件导入数据。</p>
-        </div>
-      {% endif %}
-    </section>
-  </div>
 
   <form action="{{ url_for('filter_results', data_id=data_id) }}" method="post" id="filter-form">
     <section class="section-card">
@@ -229,7 +148,7 @@
           {% else %}
             <div class="empty-note">
               <strong>暂无可选第一卡口</strong>
-              <p>请先使用上方小按钮导入卡口库。</p>
+              <p>请先进入“卡口库导入与管理”页面导入卡口库。</p>
             </div>
           {% endif %}
         </section>
@@ -261,7 +180,7 @@
           {% else %}
             <div class="empty-note">
               <strong>暂无可选第二卡口</strong>
-              <p>请先使用上方小按钮导入卡口库。</p>
+              <p>请先进入“卡口库导入与管理”页面导入卡口库。</p>
             </div>
           {% endif %}
         </section>
@@ -353,7 +272,7 @@
         {% else %}
           <div class="empty-note">
             <strong>暂无可选卡口</strong>
-            <p>请先使用上方小按钮导入卡口库。</p>
+            <p>请先进入“卡口库导入与管理”页面导入卡口库。</p>
           </div>
         {% endif %}
       </section>
@@ -481,7 +400,7 @@
         {% else %}
           <div class="empty-note">
             <strong>暂无可选卡口</strong>
-            <p>请先使用上方小按钮导入卡口库。</p>
+            <p>请先进入“卡口库导入与管理”页面导入卡口库。</p>
           </div>
         {% endif %}
       </section>
@@ -517,7 +436,7 @@
         {% else %}
           <div class="empty-note">
             <strong>本地重点人库为空</strong>
-            <p>请先通过上方"重点人库管理"导入重点人数据。</p>
+            <p>请先进入“重点人导入与管理”页面导入重点人数据。</p>
           </div>
         {% endif %}
       </section>
@@ -817,14 +736,6 @@
         modeInputs.forEach(function (input) { input.addEventListener("change", syncMode); });
         syncMode();
       }
-
-      // 重点人文件上传按钮
-      document.querySelectorAll("[data-keyperson-file-trigger]").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          var input = btn.closest("form").querySelector('input[type="file"]');
-          if (input) input.click();
-        });
-      });
 
       document.querySelectorAll("[data-checkpoint-selector]").forEach(initCheckpointSelector);
       document.querySelectorAll("[data-frequent-selector]").forEach(initFrequentSelector);

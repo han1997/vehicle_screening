@@ -206,6 +206,46 @@ def _save_session_history(history):
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
+def _prune_invalid_session_history():
+    """清理历史中数据不存在或已过期的会话记录。"""
+    history = _load_session_history()
+    if not history:
+        return []
+
+    now = time.time()
+    updated_history = []
+    changed = False
+
+    for entry in history:
+        data_id = normalize_text_value(entry.get("data_id"))
+        if not data_id:
+            changed = True
+            continue
+
+        last_access_time = entry.get("last_access_time", 0)
+        try:
+            last_access_time = float(last_access_time)
+        except (TypeError, ValueError):
+            last_access_time = 0
+
+        # 历史记录自身过期，直接丢弃
+        if now - last_access_time > SESSION_TTL_SECONDS:
+            changed = True
+            continue
+
+        # 会话数据不存在（数据库文件缺失/损坏）或已过期
+        if not _get_or_restore_session(data_id):
+            changed = True
+            continue
+
+        updated_history.append(entry)
+
+    if changed:
+        _save_session_history(updated_history)
+
+    return updated_history
+
+
 def _add_to_session_history(data_id, filenames, record_count):
     """添加或更新一条历史记录。"""
     history = _load_session_history()
@@ -1119,8 +1159,8 @@ def build_pair_display_results(filtered_df):
 
 def build_frequent_display_results(filtered_df, threshold, selected_export_columns):
     """构造频繁出现模式的前端展示数据。"""
-    # 过滤掉与内置列语义重复的导出列（仅影响展示，导出文件仍保留全量）
-    display_export_columns = [c for c in selected_export_columns if not _is_overlapping_column(c)]
+    # 过滤掉与内置列语义重复的导出列
+    display_export_columns = sanitize_export_columns(selected_export_columns)
 
     display_results = []
 
@@ -1164,7 +1204,7 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
 
 def build_keyperson_display_results(filtered_df, selected_export_columns):
     """构造重点人模式的前端展示数据。"""
-    display_export_columns = [c for c in selected_export_columns if not _is_overlapping_column(c)]
+    display_export_columns = sanitize_export_columns(selected_export_columns)
 
     display_results = []
 
@@ -1342,6 +1382,7 @@ def build_export_dataframe(filtered_df):
 
 def build_frequent_export_dataframe(filtered_df, selected_export_columns, threshold):
     """构造频繁出现模式导出表，并返回需要合并的单元格信息和风险级别列表。"""
+    export_columns = sanitize_export_columns(selected_export_columns)
     summary_columns = [
         "车牌号",
         "号牌种类",
@@ -1358,7 +1399,7 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
         "本条卡口",
         "本条号牌种类",
     ]
-    all_columns = summary_columns + detail_columns + selected_export_columns
+    all_columns = summary_columns + detail_columns + export_columns
 
     if filtered_df is None or filtered_df.empty:
         return pd.DataFrame(columns=all_columns), [], []
@@ -1366,7 +1407,8 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
     export_rows = []
     merge_ranges = []
     risk_levels = []
-    excel_row = 2
+    # 导出表数据从第 5 行开始（第 1-4 行为标题/摘要/时间/表头）
+    excel_row = 5
 
     for row in filtered_df.to_dict(orient="records"):
         occurrence_count = int(row.get("occurrence_count", 0) or 0)
@@ -1388,7 +1430,7 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
             "本条号牌种类": normalize_text_value(row.get("event_plate_type", "")),
         }
 
-        for column in selected_export_columns:
+        for column in export_columns:
             export_row[column] = normalize_text_value(row.get(source_column_key(column), ""))
 
         export_rows.append(export_row)
@@ -1408,6 +1450,7 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
 
 def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
     """构造重点人模式导出表，并返回需要合并的单元格信息和风险级别列表。"""
+    export_columns = sanitize_export_columns(selected_export_columns)
     summary_columns = [
         "车牌号", "姓名", "身份证", "手机",
         "出现次数", "夜间出现次数", "夜间占比",
@@ -1420,7 +1463,7 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
         "本条卡口",
         "本条号牌种类",
     ]
-    all_columns = summary_columns + detail_columns + selected_export_columns
+    all_columns = summary_columns + detail_columns + export_columns
 
     if filtered_df is None or filtered_df.empty:
         return pd.DataFrame(columns=all_columns), [], []
@@ -1428,7 +1471,8 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
     export_rows = []
     merge_ranges = []
     risk_levels = []
-    excel_row = 2
+    # 导出表数据从第 5 行开始（第 1-4 行为标题/摘要/时间/表头）
+    excel_row = 5
 
     for row in filtered_df.to_dict(orient="records"):
         level = row.get("level", "blue")
@@ -1458,7 +1502,7 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
             "本条号牌种类": normalize_text_value(row.get("event_plate_type", "")),
         }
 
-        for column in selected_export_columns:
+        for column in export_columns:
             export_row[column] = normalize_text_value(row.get(source_column_key(column), ""))
 
         export_rows.append(export_row)
@@ -1914,9 +1958,9 @@ def build_keyperson_warning_workbook(export_df, risk_levels, summary, merge_rang
 # 与频繁模式内置列语义重叠的候选词，用于过滤导出列中的重复项
 _OVERLAP_CANDIDATES = {
     "plate": ["车牌号", "车牌号码", "车牌", "号牌号码", "plate", "plate_no", "license_plate"],
-    "time": ["抓拍时间", "通过时间", "时间", "通行时间", "capture_time", "time", "timestamp"],
-    "location": ["抓拍地点", "地点", "位置", "地点名称", "location", "site"],
-    "plate_type": ["号牌种类", "号牌类型", "车牌种类", "车牌类型", "plate_type", "plate_kind"],
+    "time": ["抓拍时间", "本条抓拍时间", "通过时间", "时间", "通行时间", "capture_time", "time", "timestamp"],
+    "location": ["抓拍地点", "本条卡口", "地点", "位置", "地点名称", "location", "site"],
+    "plate_type": ["号牌种类", "本条号牌种类", "号牌类型", "车牌种类", "车牌类型", "plate_type", "plate_kind"],
 }
 
 
@@ -1930,6 +1974,12 @@ def _is_overlapping_column(column_name):
             if normalize_text_value(cand).lower() == col_lower:
                 return True
     return False
+
+
+def sanitize_export_columns(selected_export_columns):
+    """对导出列去重并移除与内置列语义重复的列。"""
+    normalized = normalize_choice_list(selected_export_columns or [])
+    return [column for column in normalized if not _is_overlapping_column(column)]
 
 
 def parse_excel(path):
@@ -2077,16 +2127,8 @@ def _cleanup_sessions():
             except OSError:
                 pass
 
-    if expired:
-        expired_set = set(expired)
-        history = _load_session_history()
-        updated_history = [
-            entry for entry in history
-            if entry.get("data_id") not in expired_set
-            and now - entry.get("last_access_time", 0) <= SESSION_TTL_SECONDS
-        ]
-        if len(updated_history) != len(history):
-            _save_session_history(updated_history)
+    # 同步清理“最近上传记录”中数据不存在或已过期的会话条目
+    _prune_invalid_session_history()
 
 
 @app.route("/", methods=["GET"])
@@ -2095,7 +2137,7 @@ def upload_form():
     checkpoint_library = load_checkpoint_library()
     matched_home_checkpoints = checkpoint_library[:12]
     keyperson_library = load_keyperson_library()
-    session_history = _load_session_history()
+    session_history = _prune_invalid_session_history()
     latest_session_id = ""
     if session_history:
         latest_session_id = normalize_text_value(session_history[0].get("data_id", ""))

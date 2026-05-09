@@ -89,3 +89,11 @@
   - 无结果时会给空状态提示，不允许下载空结果。
 
   如果你愿意，我可以下一步给你一份“EXE 重构接口草图”（模块划分、类结构、输入输出 DTO、算法伪代码），直接对应这套功能。
+  
+
+  py -3.8 -m venv .venv38
+  .\.venv38\Scripts\python.exe -m pip install -U pip
+  .\.venv38\Scripts\python.exe -m pip install flask pandas xlrd openpyxl
+
+  # 2) Win7 兼容打包
+  .\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38\Scripts\python.exe

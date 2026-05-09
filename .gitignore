@@ -6,6 +6,7 @@ __pycache__/
 
 # Virtual environment
 .venv/
+.venv38/
 venv/
 env/
 
@@ -25,3 +26,9 @@ Desktop.ini
 
 # Claude Code
 .claude/
+
+# PyInstaller artifacts
+build/
+dist/
+*.spec
+_pyi_runtime/

@@ -1,6 +1,8 @@
-import os
 import json
+import os
+import shutil
 import sqlite3
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -11,26 +13,70 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 from flask import Flask, render_template, request, redirect, url_for, send_file, flash
 
-app = Flask(__name__)
-app.config["SECRET_KEY"] = "change-this-secret"  # 本地使用即可，如需部署请修改
-app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 100 MB
-
-os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
-
 ALLOWED_EXTENSIONS = {"xls", "xlsx"}
-CHECKPOINT_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "checkpoint_library.json")
-KEYPERSON_LIBRARY_FILE = os.path.join(os.path.dirname(__file__), "keyperson_library.json")
-SESSION_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "uploads", "session_history.json")
 FILTER_MODE_PAIR = "pair"
 FILTER_MODE_FREQUENT = "frequent"
 FILTER_MODE_KEYPERSON = "keyperson"
+FILTER_MODE_TIMED_CROSS = "timed_cross"
 DEFAULT_FREQUENT_OCCURRENCE = 2
 DEFAULT_FREQUENT_START_CLOCK = "00:00"
 DEFAULT_FREQUENT_END_CLOCK = "23:59"
 DEFAULT_KEYPERSON_MIN_OCCURRENCE = 1
 SOURCE_COLUMN_PREFIX = "__source__"
 PAGE_SIZE = 100
+
+
+def _resource_base_dir():
+    """Return directory used to read bundled resources."""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _runtime_base_dir():
+    """Return directory used to store writable runtime data."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+RESOURCE_BASE_DIR = _resource_base_dir()
+RUNTIME_BASE_DIR = _runtime_base_dir()
+
+
+def _prepare_runtime_json(filename, default_value):
+    """Ensure runtime JSON exists, seeded from bundled file if available."""
+    runtime_path = os.path.join(RUNTIME_BASE_DIR, filename)
+    if os.path.exists(runtime_path):
+        return runtime_path
+
+    bundled_path = os.path.join(RESOURCE_BASE_DIR, filename)
+    if os.path.exists(bundled_path):
+        try:
+            shutil.copy2(bundled_path, runtime_path)
+            return runtime_path
+        except OSError:
+            pass
+
+    with open(runtime_path, "w", encoding="utf-8") as f:
+        json.dump(default_value, f, ensure_ascii=False, indent=2)
+    return runtime_path
+
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(RESOURCE_BASE_DIR, "templates"),
+    static_folder=os.path.join(RESOURCE_BASE_DIR, "static"),
+)
+app.config["SECRET_KEY"] = "change-this-secret"  # 本地使用即可，如需部署请修改
+app.config["UPLOAD_FOLDER"] = os.path.join(RUNTIME_BASE_DIR, "uploads")
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 100 MB
+
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
+CHECKPOINT_LIBRARY_FILE = _prepare_runtime_json("checkpoint_library.json", [])
+KEYPERSON_LIBRARY_FILE = _prepare_runtime_json("keyperson_library.json", [])
+SESSION_HISTORY_FILE = os.path.join(app.config["UPLOAD_FOLDER"], "session_history.json")
 
 # 简单的内存数据存储，适合本地单用户使用
 DATA_STORE = {}
@@ -416,6 +462,17 @@ def parse_time_window(start_time_str, end_time_str):
     return start_time, end_time
 
 
+def parse_datetime_local_value(datetime_text, field_name):
+    """解析单个 datetime-local 值。"""
+    text = normalize_text_value(datetime_text)
+    if not text:
+        raise ValueError(f"请填写{field_name}。")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(f"{field_name}格式不正确，请重新选择。")
+
+
 def parse_clock_window(start_clock_str, end_clock_str):
     """解析日内时段（HH:MM-HH:MM），支持跨天。"""
     if not start_clock_str or not end_clock_str:
@@ -683,6 +740,8 @@ def prune_removed_checkpoints_from_config(config, removed_checkpoints):
     second_checkpoint = normalize_text_value(config.get("second_checkpoint"))
     entry_checkpoint = normalize_text_value(config.get("entry_checkpoint"))
     exit_checkpoint = normalize_text_value(config.get("exit_checkpoint"))
+    timed_entry_checkpoint = normalize_text_value(config.get("timed_entry_checkpoint"))
+    timed_exit_checkpoint = normalize_text_value(config.get("timed_exit_checkpoint"))
 
     if first_checkpoint in removed_set:
         config["first_checkpoint"] = ""
@@ -692,6 +751,10 @@ def prune_removed_checkpoints_from_config(config, removed_checkpoints):
         config["entry_checkpoint"] = ""
     if exit_checkpoint in removed_set:
         config["exit_checkpoint"] = ""
+    if timed_entry_checkpoint in removed_set:
+        config["timed_entry_checkpoint"] = ""
+    if timed_exit_checkpoint in removed_set:
+        config["timed_exit_checkpoint"] = ""
 
     frequent_checkpoints = normalize_choice_list(config.get("frequent_checkpoints", []))
     config["frequent_checkpoints"] = [
@@ -871,6 +934,92 @@ def build_pair_filtered_dataframe(
     if results:
         filtered_df = pd.DataFrame(results)
         return filtered_df.sort_values("score", ascending=False)
+
+    return pd.DataFrame(
+        columns=[
+            "plate",
+            "plate_type",
+            "first_time",
+            "first_location",
+            "second_time",
+            "second_location",
+            "delta_minutes",
+            "score",
+            "level",
+        ]
+    )
+
+
+def build_timed_cross_filtered_dataframe(
+    df,
+    active_entry_locations,
+    active_exit_locations,
+    entry_before_time,
+    exit_after_time,
+):
+    """绝对时间卡口筛选：先在某时刻前经过入口，再在某时刻后经过出口。"""
+    valid_locations = active_entry_locations.union(active_exit_locations)
+    df_valid = df[df["location"].isin(valid_locations)].copy()
+    df_valid = df_valid.sort_values("time")
+
+    results = []
+
+    for plate, group in df_valid.groupby("plate"):
+        entry_events = group[
+            (group["location"].isin(active_entry_locations))
+            & (group["time"] <= entry_before_time)
+        ]
+        exit_events = group[
+            (group["location"].isin(active_exit_locations))
+            & (group["time"] >= exit_after_time)
+        ]
+
+        if entry_events.empty or exit_events.empty:
+            continue
+
+        # 取“离前置时刻最近的一条入口记录”与“其后最早的一条出口记录”。
+        entry_row = entry_events.sort_values("time").iloc[-1]
+        valid_exits = exit_events[exit_events["time"] > entry_row["time"]]
+        if valid_exits.empty:
+            continue
+        exit_row = valid_exits.sort_values("time").iloc[0]
+
+        delta_minutes = (exit_row["time"] - entry_row["time"]).total_seconds() / 60.0
+        before_gap = max(
+            (entry_before_time - entry_row["time"]).total_seconds() / 60.0,
+            0.0,
+        )
+        after_gap = max(
+            (exit_row["time"] - exit_after_time).total_seconds() / 60.0,
+            0.0,
+        )
+        # 边界贴近度评分：越接近“前置/后置”边界，分数越高。
+        score = int(round(max(0.0, 100.0 - min(before_gap + after_gap, 100.0))))
+
+        if score >= 70:
+            level = "red"
+        elif score >= 40:
+            level = "yellow"
+        else:
+            level = "blue"
+
+        results.append(
+            {
+                "plate": plate,
+                "plate_type": normalize_text_value(entry_row.get("plate_type", "")),
+                "first_time": entry_row["time"],
+                "first_location": entry_row["location"],
+                "second_time": exit_row["time"],
+                "second_location": exit_row["location"],
+                "delta_minutes": delta_minutes,
+                "score": score,
+                "level": level,
+            }
+        )
+
+    if results:
+        filtered_df = pd.DataFrame(results)
+        return filtered_df.sort_values(["score", "delta_minutes"], ascending=[False, True])
 
     return pd.DataFrame(
         columns=[
@@ -1302,7 +1451,7 @@ def paginate_results(results, page, filter_mode):
 
     total = len(results)
 
-    if filter_mode == FILTER_MODE_PAIR:
+    if filter_mode in {FILTER_MODE_PAIR, FILTER_MODE_TIMED_CROSS}:
         total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         page = max(1, min(page, total_pages))
         start = (page - 1) * PAGE_SIZE
@@ -2164,21 +2313,24 @@ def upload():
         flash("请选择要上传的文件。")
         return redirect(url_for("upload_form"))
 
+    valid_files = []
+    skipped_non_excel = []
+    for f in files:
+        if allowed_file(f.filename):
+            valid_files.append(f)
+        else:
+            skipped_non_excel.append(f.filename)
+
+    if not valid_files:
+        flash("未发现可解析的 Excel 文件（仅支持 .xls / .xlsx）。")
+        return redirect(url_for("upload_form"))
+
     dfs = []
     source_columns = []
     source_column_set = set()
     temp_filepaths = []
 
-    for file in files:
-        if not allowed_file(file.filename):
-            for fp in temp_filepaths:
-                try:
-                    os.remove(fp)
-                except OSError:
-                    pass
-            flash(f"文件 {file.filename} 不是支持的 Excel 格式。")
-            return redirect(url_for("upload_form"))
-
+    for file in valid_files:
         filepath = save_uploaded_excel(file)
         temp_filepaths.append(filepath)
 
@@ -2217,7 +2369,7 @@ def upload():
     # DataFrame 持久化到 SQLite，不在内存中保留
     _save_df(df, data_id, "raw_data")
     record_count = len(df)
-    filenames_list = [f.filename for f in files]
+    filenames_list = [f.filename for f in valid_files]
     del df
     del dfs
 
@@ -2249,6 +2401,10 @@ def upload():
             "start_time": default_start_time,
             "end_time": default_end_time,
             "target_minutes": default_max_minutes,
+            "timed_entry_checkpoint": "",
+            "timed_exit_checkpoint": "",
+            "timed_entry_before_time": default_start_time,
+            "timed_exit_after_time": default_end_time,
         },
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "last_access": time.time(),
@@ -2256,6 +2412,15 @@ def upload():
 
     _save_metadata(data_id)
     _add_to_session_history(data_id, filenames_list, record_count)
+
+    if skipped_non_excel:
+        preview = "、".join(skipped_non_excel[:3])
+        remain = len(skipped_non_excel) - 3
+        if remain > 0:
+            preview = f"{preview} 等"
+        flash(
+            f"已忽略 {len(skipped_non_excel)} 个非 Excel 文件（{preview}），其余 Excel 已成功导入。"
+        )
 
     return redirect(url_for("review", data_id=data_id))
 
@@ -2563,7 +2728,12 @@ def review(data_id):
 
     config = data.get("config", {})
     filter_mode = normalize_text_value(config.get("filter_mode", FILTER_MODE_PAIR)).lower()
-    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT, FILTER_MODE_KEYPERSON}:
+    if filter_mode not in {
+        FILTER_MODE_PAIR,
+        FILTER_MODE_TIMED_CROSS,
+        FILTER_MODE_FREQUENT,
+        FILTER_MODE_KEYPERSON,
+    }:
         filter_mode = FILTER_MODE_PAIR
 
     start_time_value = normalize_text_value(config.get("start_time")) or data.get(
@@ -2608,6 +2778,23 @@ def review(data_id):
             selected_second_checkpoint = legacy_exit[0]
         elif isinstance(legacy_exit, str):
             selected_second_checkpoint = legacy_exit
+
+    selected_timed_entry_checkpoint = normalize_text_value(
+        config.get("timed_entry_checkpoint")
+    )
+    if not selected_timed_entry_checkpoint:
+        selected_timed_entry_checkpoint = selected_first_checkpoint
+    selected_timed_exit_checkpoint = normalize_text_value(
+        config.get("timed_exit_checkpoint")
+    )
+    if not selected_timed_exit_checkpoint:
+        selected_timed_exit_checkpoint = selected_second_checkpoint
+    timed_entry_before_time_value = normalize_text_value(
+        config.get("timed_entry_before_time")
+    ) or start_time_value
+    timed_exit_after_time_value = normalize_text_value(
+        config.get("timed_exit_after_time")
+    ) or end_time_value
 
     current_locations = data.get("locations", [])
     matched_checkpoints = sorted(set(current_locations).intersection(checkpoint_library))
@@ -2690,6 +2877,10 @@ def review(data_id):
         prioritized_checkpoint_library=prioritized_checkpoint_library,
         selected_first_checkpoint=selected_first_checkpoint,
         selected_second_checkpoint=selected_second_checkpoint,
+        selected_timed_entry_checkpoint=selected_timed_entry_checkpoint,
+        selected_timed_exit_checkpoint=selected_timed_exit_checkpoint,
+        timed_entry_before_time_value=timed_entry_before_time_value,
+        timed_exit_after_time_value=timed_exit_after_time_value,
         selected_frequent_checkpoints=selected_frequent_checkpoints,
         selected_export_columns=selected_export_columns,
         min_occurrence_value=min_occurrence_value,
@@ -2737,7 +2928,12 @@ def filter_results(data_id):
         df = df[~df["plate_type"].isin(exclude_plate_types)]
 
     filter_mode = normalize_text_value(request.form.get("filter_mode", FILTER_MODE_PAIR)).lower()
-    if filter_mode not in {FILTER_MODE_PAIR, FILTER_MODE_FREQUENT, FILTER_MODE_KEYPERSON}:
+    if filter_mode not in {
+        FILTER_MODE_PAIR,
+        FILTER_MODE_TIMED_CROSS,
+        FILTER_MODE_FREQUENT,
+        FILTER_MODE_KEYPERSON,
+    }:
         filter_mode = FILTER_MODE_PAIR
 
     config.update(
@@ -2818,6 +3014,94 @@ def filter_results(data_id):
         DATA_STORE[data_id]["last_access"] = time.time()
         _save_metadata(data_id)
         _update_history_filter_mode(data_id, FILTER_MODE_PAIR)
+
+        return redirect(url_for("show_results", data_id=data_id))
+
+    elif filter_mode == FILTER_MODE_TIMED_CROSS:
+        timed_entry_before_time_str = normalize_text_value(
+            request.form.get("timed_entry_before_time")
+        )
+        timed_exit_after_time_str = normalize_text_value(
+            request.form.get("timed_exit_after_time")
+        )
+        try:
+            timed_entry_before_time = parse_datetime_local_value(
+                timed_entry_before_time_str, "“前置经过时间”"
+            )
+            timed_exit_after_time = parse_datetime_local_value(
+                timed_exit_after_time_str, "“后置离开时间”"
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("review", data_id=data_id))
+
+        if timed_entry_before_time > timed_exit_after_time:
+            flash("请确保“前置经过时间”早于或等于“后置离开时间”。")
+            return redirect(url_for("review", data_id=data_id))
+
+        # datetime-local 通常精度到分钟，补齐“前置时刻”到该分钟末尾，减少秒级误差影响。
+        if timed_entry_before_time.second == 0 and timed_entry_before_time.microsecond == 0:
+            timed_entry_before_time = (
+                timed_entry_before_time
+                + timedelta(minutes=1)
+                - timedelta(microseconds=1)
+            )
+
+        timed_entry_checkpoint = normalize_text_value(
+            request.form.get("timed_entry_checkpoint")
+        )
+        timed_exit_checkpoint = normalize_text_value(
+            request.form.get("timed_exit_checkpoint")
+        )
+
+        if not timed_entry_checkpoint or not timed_exit_checkpoint:
+            flash("请分别选择“前置经过卡口”和“后置离开卡口”。")
+            return redirect(url_for("review", data_id=data_id))
+
+        if timed_entry_checkpoint not in checkpoint_library or timed_exit_checkpoint not in checkpoint_library:
+            flash("所选卡口不在本地卡口库中，请重新选择。")
+            return redirect(url_for("review", data_id=data_id))
+
+        if timed_entry_checkpoint == timed_exit_checkpoint:
+            flash("前置经过卡口和后置离开卡口不能相同，请重新选择。")
+            return redirect(url_for("review", data_id=data_id))
+
+        active_entry_locations = {timed_entry_checkpoint}.intersection(current_data_locations)
+        active_exit_locations = {timed_exit_checkpoint}.intersection(current_data_locations)
+        if not active_entry_locations or not active_exit_locations:
+            flash("所选卡口未出现在当前通行数据中，请重新选择。")
+            return redirect(url_for("review", data_id=data_id))
+
+        filtered_df = build_timed_cross_filtered_dataframe(
+            df=df,
+            active_entry_locations=active_entry_locations,
+            active_exit_locations=active_exit_locations,
+            entry_before_time=timed_entry_before_time,
+            exit_after_time=timed_exit_after_time,
+        )
+        summary = build_results_summary(filtered_df)
+        _save_df(filtered_df, data_id, "filtered_data")
+        del df, filtered_df
+
+        config.update(
+            {
+                "timed_entry_checkpoint": timed_entry_checkpoint,
+                "timed_exit_checkpoint": timed_exit_checkpoint,
+                "timed_entry_before_time": timed_entry_before_time_str,
+                "timed_exit_after_time": timed_exit_after_time_str,
+                # 兼容历史字段，便于“删除卡口”时统一清理。
+                "entry_checkpoint": timed_entry_checkpoint,
+                "exit_checkpoint": timed_exit_checkpoint,
+            }
+        )
+
+        DATA_STORE[data_id]["config"] = config
+        DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_TIMED_CROSS
+        DATA_STORE[data_id]["summary"] = summary
+        DATA_STORE[data_id]["selected_export_columns"] = []
+        DATA_STORE[data_id]["last_access"] = time.time()
+        _save_metadata(data_id)
+        _update_history_filter_mode(data_id, FILTER_MODE_TIMED_CROSS)
 
         return redirect(url_for("show_results", data_id=data_id))
 
@@ -3008,7 +3292,7 @@ def show_results(data_id):
 
     # 从 SQLite 加载筛选结果并重建 display_results
     filtered_df = _load_df(data_id, "filtered_data")
-    if filter_mode == FILTER_MODE_PAIR:
+    if filter_mode in {FILTER_MODE_PAIR, FILTER_MODE_TIMED_CROSS}:
         filtered_df = _restore_pair_dtypes(filtered_df)
         display_results = build_pair_display_results(filtered_df)
     elif filter_mode == FILTER_MODE_KEYPERSON:
@@ -3167,6 +3451,12 @@ def download(data_id):
             export_df, risk_levels, kp_summary, merge_ranges,
         )
         filename = "重点人车辆筛选结果.xlsx"
+    elif filter_mode == FILTER_MODE_TIMED_CROSS:
+        filtered_df = _restore_pair_dtypes(filtered_df)
+        export_df, risk_levels = build_export_dataframe(filtered_df)
+        summary = build_results_summary(filtered_df)
+        output = build_warning_workbook(export_df, risk_levels, summary)
+        filename = "绝对时间卡口筛选结果.xlsx"
     else:
         filtered_df = _restore_pair_dtypes(filtered_df)
         export_df, risk_levels = build_export_dataframe(filtered_df)
@@ -3208,4 +3498,4 @@ def _restore_sessions_on_startup():
 
 if __name__ == "__main__":
     _restore_sessions_on_startup()
-    app.run(debug=True)
+    app.run(port=11000, debug=not getattr(sys, "frozen", False))

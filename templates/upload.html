@@ -35,14 +35,18 @@
     <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
       <label for="files">选择通行记录 Excel 文件（可多选）：</label>
       <div class="file-picker">
-        <input type="file" name="files" id="files" accept=".xls,.xlsx" multiple required class="file-input-native">
+        <input type="file" name="files" id="files" accept=".xls,.xlsx" multiple class="file-input-native">
+        <input type="file" id="fileAppendInput" accept=".xls,.xlsx" multiple class="file-input-native" tabindex="-1" aria-hidden="true">
+        <input type="file" id="folderAppendInput" webkitdirectory directory multiple class="file-input-native" tabindex="-1" aria-hidden="true">
         <div class="file-picker-main">
-          <button type="button" class="file-trigger" data-file-trigger>选择 Excel 文件</button>
-          <div class="file-meta" data-file-meta>未选择文件，可点击左侧按钮或再次选择覆盖。</div>
+          <button type="button" class="file-trigger" data-file-trigger>追加选择 Excel 文件</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-folder-trigger>选择文件夹上传</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-clear-selected>清空已选</button>
+          <div class="file-meta" data-file-meta>未选择文件，可分批追加或选择整个文件夹。</div>
         </div>
         <div class="file-list" data-file-list hidden></div>
       </div>
-      <small>建议表头包含：车牌号 / 抓拍时间 / 抓拍地点 / 号牌种类（如有）。支持多文件同时上传。</small>
+      <small>建议表头包含：车牌号 / 抓拍时间 / 抓拍地点 / 号牌种类（如有）。支持跨文件夹分批追加，也支持直接选择文件夹（非 Excel 会在上传时自动忽略）。</small>
 
       <div class="empty-note" style="margin-top: 16px;">
         <strong>进入第二步后可做什么</strong>
@@ -122,7 +126,7 @@
                 <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">
                   {{ entry.record_count }} 条记录 · {{ entry.upload_time[:16] }}
                   {% if entry.filter_mode %}
-                    · 已筛选（{{ {'pair':'配对','frequent':'频繁','keyperson':'重点人'}.get(entry.filter_mode, entry.filter_mode) }}）
+                    · 已筛选（{{ {'pair':'配对','timed_cross':'绝对时间卡口','frequent':'频繁','keyperson':'重点人'}.get(entry.filter_mode, entry.filter_mode) }}）
                   {% else %}
                     · 待筛选
                   {% endif %}
@@ -141,39 +145,215 @@
   <script>
     (function () {
       const input = document.getElementById("files");
+      const appendInput = document.getElementById("fileAppendInput");
+      const folderInput = document.getElementById("folderAppendInput");
       const trigger = document.querySelector("[data-file-trigger]");
+      const folderTrigger = document.querySelector("[data-folder-trigger]");
+      const clearTrigger = document.querySelector("[data-clear-selected]");
       const meta = document.querySelector("[data-file-meta]");
       const list = document.querySelector("[data-file-list]");
+      const form = input ? input.closest("form") : null;
 
-      if (!input || !trigger || !meta || !list) {
+      if (!input || !appendInput || !folderInput || !trigger || !folderTrigger || !clearTrigger || !meta || !list || !form) {
         return;
       }
 
+      if (typeof DataTransfer !== "function") {
+        trigger.textContent = "选择 Excel 文件";
+        folderTrigger.disabled = true;
+        clearTrigger.disabled = true;
+        appendInput.name = "files";
+        meta.textContent = "当前浏览器不支持分批追加，请一次性多选 Excel 文件上传。";
+
+        trigger.addEventListener("click", function () {
+          appendInput.click();
+        });
+
+        appendInput.addEventListener("change", function () {
+          const files = Array.from(appendInput.files || []);
+          if (!files.length) {
+            list.hidden = true;
+            list.replaceChildren();
+            return;
+          }
+          meta.textContent = "已选择 " + files.length + " 个文件，将在提交后统一解析。";
+          list.hidden = false;
+          list.replaceChildren();
+          files.forEach((file) => {
+            const chip = document.createElement("span");
+            chip.className = "file-chip";
+            chip.textContent = file.name;
+            chip.title = file.name;
+            list.appendChild(chip);
+          });
+        });
+
+        form.addEventListener("submit", function (event) {
+          if (!appendInput.files || appendInput.files.length === 0) {
+            event.preventDefault();
+            meta.textContent = "请先选择至少 1 个 Excel 文件。";
+          }
+        });
+        return;
+      }
+
+      const selectedFiles = new Map();
+      let lastAppendInfo = "";
+
+      function isExcelFile(fileName) {
+        const lowerName = String(fileName || "").toLowerCase();
+        return lowerName.endsWith(".xls") || lowerName.endsWith(".xlsx");
+      }
+
+      function fileKey(file) {
+        return [
+          file.name || "",
+          String(file.size || 0),
+          String(file.lastModified || 0),
+          file.webkitRelativePath || "",
+        ].join("::");
+      }
+
+      function syncFilesToSubmitInput() {
+        const dt = new DataTransfer();
+        selectedFiles.forEach((file) => {
+          dt.items.add(file);
+        });
+        input.files = dt.files;
+      }
+
+      function removeFileByKey(key) {
+        if (!key || !selectedFiles.has(key)) {
+          return;
+        }
+        selectedFiles.delete(key);
+        lastAppendInfo = "（已移除 1 个误选文件）";
+        syncFilesToSubmitInput();
+        renderFiles();
+      }
+
       function renderFiles() {
-        const files = Array.from(input.files || []);
+        const files = Array.from(selectedFiles.values());
         if (!files.length) {
-          meta.textContent = "未选择文件，可点击左侧按钮或再次选择覆盖。";
+          meta.textContent = "未选择文件，可分批追加或选择整个文件夹。";
           list.replaceChildren();
           list.hidden = true;
           return;
         }
 
-        meta.textContent = "已选择 " + files.length + " 个文件，将在提交后统一解析。";
+        meta.textContent = "已累计选择 " + files.length + " 个 Excel 文件，将在提交后统一解析。" + (lastAppendInfo ? (" " + lastAppendInfo) : "");
         list.hidden = false;
         list.replaceChildren();
         files.forEach((file) => {
+          const key = fileKey(file);
           const chip = document.createElement("span");
           chip.className = "file-chip";
-          chip.textContent = file.name;
+          const label = document.createElement("span");
+          label.className = "file-chip-label";
+          const relativePath = file.webkitRelativePath || "";
+          label.textContent = relativePath || file.name;
+          label.title = relativePath || file.name;
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "file-chip-remove";
+          removeBtn.textContent = "✕";
+          removeBtn.dataset.removeKey = key;
+          removeBtn.setAttribute("aria-label", "移除文件 " + (relativePath || file.name));
+          chip.appendChild(label);
+          chip.appendChild(removeBtn);
           list.appendChild(chip);
         });
       }
 
+      function appendFiles(fileList) {
+        const files = Array.from(fileList || []);
+        if (!files.length) {
+          return;
+        }
+
+        let addedCount = 0;
+        let duplicateCount = 0;
+        let nonExcelCount = 0;
+        files.forEach((file) => {
+          if (!isExcelFile(file.name)) {
+            nonExcelCount += 1;
+            return;
+          }
+
+          const key = fileKey(file);
+          if (selectedFiles.has(key)) {
+            duplicateCount += 1;
+            return;
+          }
+
+          selectedFiles.set(key, file);
+          addedCount += 1;
+        });
+
+        const tips = [];
+        if (addedCount > 0) {
+          tips.push("新增 " + addedCount + " 个");
+        }
+        if (duplicateCount > 0) {
+          tips.push("跳过重复 " + duplicateCount + " 个");
+        }
+        if (nonExcelCount > 0) {
+          tips.push("忽略非 Excel " + nonExcelCount + " 个");
+        }
+        lastAppendInfo = tips.length ? "（本次：" + tips.join("，") + "）" : "";
+
+        syncFilesToSubmitInput();
+        renderFiles();
+      }
+
       trigger.addEventListener("click", function () {
-        input.click();
+        appendInput.click();
       });
 
-      input.addEventListener("change", renderFiles);
+      folderTrigger.addEventListener("click", function () {
+        folderInput.click();
+      });
+
+      clearTrigger.addEventListener("click", function () {
+        selectedFiles.clear();
+        appendInput.value = "";
+        folderInput.value = "";
+        input.value = "";
+        lastAppendInfo = "";
+        renderFiles();
+      });
+
+      appendInput.addEventListener("change", function () {
+        appendFiles(appendInput.files);
+        appendInput.value = "";
+      });
+
+      folderInput.addEventListener("change", function () {
+        appendFiles(folderInput.files);
+        folderInput.value = "";
+      });
+
+      list.addEventListener("click", function (event) {
+        const removeButton = event.target.closest("[data-remove-key]");
+        if (!removeButton) {
+          return;
+        }
+        removeFileByKey(removeButton.dataset.removeKey || "");
+      });
+
+      if (!("webkitdirectory" in folderInput)) {
+        folderTrigger.disabled = true;
+        folderTrigger.title = "当前浏览器不支持选择文件夹上传";
+      }
+
+      form.addEventListener("submit", function (event) {
+        syncFilesToSubmitInput();
+        if (!input.files || input.files.length === 0) {
+          event.preventDefault();
+          meta.textContent = "请先选择至少 1 个 Excel 文件。";
+        }
+      });
+
       renderFiles();
     })();
   </script>

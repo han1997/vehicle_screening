@@ -270,9 +270,13 @@
       </div>
     {% endif %}
   {% else %}
-    <h2>筛选结果概览</h2>
+    <h2>{% if filter_mode == "timed_cross" %}绝对时间卡口筛选结果{% else %}筛选结果概览{% endif %}</h2>
     {% if results %}
+      {% if filter_mode == "timed_cross" %}
+      <p class="subtext">共找到 <strong>{{ total_results }}</strong> 条满足“前置时刻前经过 + 后置时刻后离开”条件的车辆记录对。评分越高表示越贴近你设置的时间边界。</p>
+      {% else %}
       <p class="subtext">共找到 <strong>{{ total_results }}</strong> 条满足条件的通行记录对。评分越高，越接近您设定的目标过车间隔；高风险结果会以警戒色突出显示。</p>
+      {% endif %}
 
       <div class="summary-grid">
         <div class="summary-card summary-card-danger">
@@ -369,7 +373,13 @@
       </div>
     {% else %}
       <div class="empty-state">
-        <p>没有符合条件的记录，请尝试调整第一/第二卡口、时间段或目标过车间隔。</p>
+        <p>
+          {% if filter_mode == "timed_cross" %}
+          没有符合条件的记录，请尝试调整前置/后置卡口或两个绝对时间点。
+          {% else %}
+          没有符合条件的记录，请尝试调整第一/第二卡口、时间段或目标过车间隔。
+          {% endif %}
+        </p>
         <a href="{{ url_for('review', data_id=data_id) }}" class="btn">返回修改筛选条件</a>
         <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">重新上传文件</a>
       </div>

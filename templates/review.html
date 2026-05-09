@@ -5,7 +5,7 @@
 {% block content %}
   <div class="step-badge">步骤 2 / 3 · 配置筛选</div>
   <h2>选择筛选模式并设置参数</h2>
-  <p class="subtext">支持三种模式：配对模式按日期时间范围筛选，频繁模式按日内时段筛选，重点人模式匹配已知重点人车辆并综合评分。</p>
+  <p class="subtext">支持四种模式：配对模式、绝对时间卡口模式、频繁模式、重点人模式。</p>
 
   <div class="summary-grid">
     <div class="summary-card">
@@ -27,12 +27,15 @@
       <div class="summary-label">当前模式</div>
       <div class="summary-value">
         {% if filter_mode == "pair" %}配对
+        {% elif filter_mode == "timed_cross" %}绝对时间卡口
         {% elif filter_mode == "frequent" %}频繁
         {% else %}重点人{% endif %}
       </div>
       <div class="summary-note">
         {% if filter_mode == "pair" %}
           第一/第二卡口配对分析
+        {% elif filter_mode == "timed_cross" %}
+          前置/后置时间边界筛选（{{ selected_timed_entry_checkpoint or '未选' }} → {{ selected_timed_exit_checkpoint or '未选' }}）
         {% elif filter_mode == "frequent" %}
           多卡口出现次数分析（已选 {{ selected_frequent_checkpoints|length }} 个）
         {% else %}
@@ -83,7 +86,7 @@
         <span class="selection-tag">单选</span>
       </div>
       <div class="section-hint">可随时切换。系统会记住你上次在各模式下填写的参数。</div>
-      <div class="choice-row choice-row-3">
+      <div class="choice-row choice-row-4">
         <label class="choice-card">
           <input type="radio" name="filter_mode" value="pair" {% if filter_mode == "pair" %}checked{% endif %}>
           <span>
@@ -96,6 +99,13 @@
           <span>
             <strong>频繁出现模式</strong>
             <span>一次可选多个卡口，按出现次数阈值筛出指定时间段内频繁出现车辆。</span>
+          </span>
+        </label>
+        <label class="choice-card">
+          <input type="radio" name="filter_mode" value="timed_cross" {% if filter_mode == "timed_cross" %}checked{% endif %}>
+          <span>
+            <strong>绝对时间卡口模式</strong>
+            <span>筛选在指定时刻前经过某卡口，且在指定时刻后离开另一卡口的车辆。</span>
           </span>
         </label>
         <label class="choice-card">
@@ -194,6 +204,91 @@
                value="{{ target_minutes_value }}" min="1" step="1">
         <small>当前数据命中的本地卡口：{{ matched_checkpoints|join('、') if matched_checkpoints else '暂无' }}</small>
       </section>
+    </div>
+
+    <div data-mode-block="timed_cross">
+      <section class="section-card">
+        <div class="section-title">绝对时间条件（前置/后置）</div>
+        <div class="section-hint">筛选条件为：车辆在“前置经过卡口”于前置时刻前通过，且在“后置离开卡口”于后置时刻后通过。</div>
+        <div class="clock-grid">
+          <div class="clock-card">
+            <div class="clock-card-title">前置时刻</div>
+            <input type="datetime-local" name="timed_entry_before_time" value="{{ timed_entry_before_time_value }}">
+            <small>车辆需在该时刻前经过“前置经过卡口”。</small>
+          </div>
+          <div class="clock-card">
+            <div class="clock-card-title">后置时刻</div>
+            <input type="datetime-local" name="timed_exit_after_time" value="{{ timed_exit_after_time_value }}">
+            <small>车辆需在该时刻后经过“后置离开卡口”。</small>
+          </div>
+        </div>
+      </section>
+
+      <div class="section-grid">
+        <section class="section-card" data-checkpoint-selector="timed-entry">
+          <div class="section-title section-title-inline">
+            <span>前置经过卡口</span>
+            <span class="selection-tag">单选</span>
+          </div>
+          <div class="section-hint">只统计在前置时刻之前经过该卡口的车辆记录。</div>
+          {% if checkpoint_library %}
+            <div class="search-stack">
+              <input type="search" placeholder="搜索前置经过卡口" data-search-input>
+              <div class="search-meta">
+                <span data-search-status>正在加载匹配结果...</span>
+                <span>单选后作为前置经过卡口</span>
+              </div>
+            </div>
+            <div class="checklist-panel checklist-panel-large">
+              <div class="checklist-grid">
+                {% for checkpoint in prioritized_checkpoint_library %}
+                <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                  <input type="radio" name="timed_entry_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_timed_entry_checkpoint %}checked{% endif %}>
+                  <span>{{ checkpoint }}</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <div class="empty-note">
+              <strong>暂无可选前置卡口</strong>
+              <p>请先进入“卡口库导入与管理”页面导入卡口库。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        <section class="section-card" data-checkpoint-selector="timed-exit">
+          <div class="section-title section-title-inline">
+            <span>后置离开卡口</span>
+            <span class="selection-tag">单选</span>
+          </div>
+          <div class="section-hint">只统计在后置时刻之后经过该卡口的车辆记录。</div>
+          {% if checkpoint_library %}
+            <div class="search-stack">
+              <input type="search" placeholder="搜索后置离开卡口" data-search-input>
+              <div class="search-meta">
+                <span data-search-status>正在加载匹配结果...</span>
+                <span>单选后作为后置离开卡口</span>
+              </div>
+            </div>
+            <div class="checklist-panel checklist-panel-large">
+              <div class="checklist-grid">
+                {% for checkpoint in prioritized_checkpoint_library %}
+                <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}" data-current="{% if checkpoint in matched_checkpoints %}1{% else %}0{% endif %}">
+                  <input type="radio" name="timed_exit_checkpoint" value="{{ checkpoint }}" {% if checkpoint == selected_timed_exit_checkpoint %}checked{% endif %}>
+                  <span>{{ checkpoint }}</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+          {% else %}
+            <div class="empty-note">
+              <strong>暂无可选后置卡口</strong>
+              <p>请先进入“卡口库导入与管理”页面导入卡口库。</p>
+            </div>
+          {% endif %}
+        </section>
+      </div>
     </div>
 
     <div data-mode-block="frequent">
@@ -496,6 +591,9 @@
       <div class="toolbar-note" data-mode-note="pair">
         配对模式提交时会校验第一卡口和第二卡口必须各选一个且不能相同。
       </div>
+      <div class="toolbar-note" data-mode-note="timed_cross">
+        绝对时间卡口模式会校验：前置/后置卡口均已选择，且同一车辆满足“前置时刻前经过 + 后置时刻后离开”。
+      </div>
       <div class="toolbar-note" data-mode-note="frequent">
         频繁模式按日内时段筛选（支持跨天，如 20:00-04:00），并对同一车辆做聚合展示。
       </div>
@@ -509,6 +607,119 @@
 {% block extra_scripts %}
   <script>
     (function () {
+      if (!Array.from) {
+        Array.from = function (arrayLike) {
+          return Array.prototype.slice.call(arrayLike || []);
+        };
+      }
+      if (!Array.prototype.find) {
+        Array.prototype.find = function (predicate) {
+          if (this == null || typeof predicate !== "function") return undefined;
+          for (var i = 0; i < this.length; i++) {
+            if (predicate(this[i], i, this)) return this[i];
+          }
+          return undefined;
+        };
+      }
+      if (!String.prototype.includes) {
+        String.prototype.includes = function (search, start) {
+          return this.indexOf(search, start || 0) !== -1;
+        };
+      }
+      if (typeof NodeList !== "undefined" && !NodeList.prototype.forEach) {
+        NodeList.prototype.forEach = Array.prototype.forEach;
+      }
+      if (typeof HTMLCollection !== "undefined" && !HTMLCollection.prototype.forEach) {
+        HTMLCollection.prototype.forEach = Array.prototype.forEach;
+      }
+      if (typeof Element !== "undefined") {
+        if (!Element.prototype.matches) {
+          Element.prototype.matches = Element.prototype.msMatchesSelector || Element.prototype.webkitMatchesSelector;
+        }
+        if (!Element.prototype.closest) {
+          Element.prototype.closest = function (selector) {
+            var element = this;
+            while (element && element.nodeType === 1) {
+              if (element.matches(selector)) return element;
+              element = element.parentElement || element.parentNode;
+            }
+            return null;
+          };
+        }
+      }
+
+      function setClass(element, className, enabled) {
+        if (!element || !element.classList) return;
+        if (enabled) {
+          element.classList.add(className);
+        } else {
+          element.classList.remove(className);
+        }
+      }
+
+      function dispatchChangeEvent(element) {
+        if (!element) return;
+        var eventObj;
+        if (typeof Event === "function") {
+          eventObj = new Event("change", { bubbles: false });
+        } else {
+          eventObj = document.createEvent("Event");
+          eventObj.initEvent("change", false, false);
+        }
+        element.dispatchEvent(eventObj);
+      }
+
+      function resolveSelectionLabel(node) {
+        var label = node && node.closest ? node.closest("label") : null;
+        if (!label) return null;
+        if (!label.classList) return null;
+        if (!label.classList.contains("choice-card") && !label.classList.contains("check-item")) {
+          return null;
+        }
+        return label;
+      }
+
+      function syncInputVisualState(input) {
+        var label = resolveSelectionLabel(input);
+        if (!label) return;
+        setClass(label, "is-checked", !!input.checked);
+      }
+
+      function syncSelectionVisualStates() {
+        var inputs = document.querySelectorAll(
+          'label.choice-card input[type="radio"], label.check-item input[type="radio"], label.check-item input[type="checkbox"]'
+        );
+        Array.from(inputs).forEach(syncInputVisualState);
+      }
+
+      document.addEventListener("change", function (event) {
+        var target = event.target;
+        if (!target || !target.type) return;
+        var type = String(target.type).toLowerCase();
+        if (type !== "checkbox" && type !== "radio") return;
+        var label = resolveSelectionLabel(target);
+        if (!label) return;
+
+        if (type === "radio" && target.name) {
+          var radios = Array.from(document.querySelectorAll('input[type="radio"]'));
+          radios.forEach(function (radio) {
+            if (radio.name === target.name) syncInputVisualState(radio);
+          });
+        } else {
+          syncInputVisualState(target);
+        }
+      });
+
+      document.addEventListener("focusin", function (event) {
+        var label = resolveSelectionLabel(event.target);
+        if (label) setClass(label, "is-focused", true);
+      });
+
+      document.addEventListener("focusout", function (event) {
+        var label = resolveSelectionLabel(event.target);
+        if (label) setClass(label, "is-focused", false);
+      });
+
       function initCheckpointSelector(section) {
         var input = section.querySelector("[data-search-input]");
         var status = section.querySelector("[data-search-status]");
@@ -525,7 +736,7 @@
           items.forEach(function (item) {
             var text = item.dataset.search || "";
             var matched = !query || text.includes(query);
-            item.classList.toggle("check-item-hidden", !matched);
+            setClass(item, "check-item-hidden", !matched);
             if (matched) {
               matchedItems.push(item);
               if (item.dataset.current === "1") currentMatchedItems.push(item);
@@ -559,7 +770,7 @@
           items.forEach(function (item) {
             var text = item.dataset.search || "";
             var matched = !query || text.includes(query);
-            item.classList.toggle("check-item-hidden", !matched);
+            setClass(item, "check-item-hidden", !matched);
             if (matched) { matchedCount++; if (item.dataset.current === "1") currentMatchedCount++; }
           });
           checkboxes.forEach(function (cb) { if (cb.checked) selectedCount++; });
@@ -592,7 +803,7 @@
           items.forEach(function (item) {
             var text = item.dataset.search || "";
             var ok = !query || text.includes(query);
-            item.classList.toggle("check-item-hidden", !ok);
+            setClass(item, "check-item-hidden", !ok);
             if (ok) { matched++; if (item.dataset.current === "1") currentMatched++; }
           });
           checkboxes.forEach(function (cb) { if (cb.checked) selected++; });
@@ -622,7 +833,7 @@
           items.forEach(function (item) {
             var text = item.dataset.search || "";
             var ok = !query || text.includes(query);
-            item.classList.toggle("check-item-hidden", !ok);
+            setClass(item, "check-item-hidden", !ok);
             if (ok) matched++;
           });
           checkboxes.forEach(function (cb) { if (cb.checked) selected++; });
@@ -653,7 +864,7 @@
           items.forEach(function (item) {
             var text = item.dataset.search || "";
             var matched = !query || text.includes(query);
-            item.classList.toggle("check-item-hidden", !matched);
+            setClass(item, "check-item-hidden", !matched);
             if (matched) matchedCount++;
           });
           checkboxes.forEach(function (cb) { if (cb.checked) selectedCount++; });
@@ -697,7 +908,7 @@
           items.forEach(function (item) {
             var text = item.dataset.search || "";
             var matched = !query || text.includes(query);
-            item.classList.toggle("check-item-hidden", !matched);
+            setClass(item, "check-item-hidden", !matched);
             if (matched) matchedCount++;
           });
           checkboxes.forEach(function (cb) { if (cb.checked) selectedCount++; });
@@ -748,6 +959,7 @@
         initExportColumnStatus(filterForm);
         initKeypersonExportColumnStatus(filterForm);
       }
+      syncSelectionVisualStates();
 
       // 全选 / 取消全选
       document.addEventListener("click", function (e) {
@@ -763,7 +975,7 @@
           var label = cb.closest("label");
           if (label && label.classList.contains("check-item-hidden")) return;
           cb.checked = isChecked;
-          cb.dispatchEvent(new Event("change", { bubbles: false }));
+          dispatchChangeEvent(cb);
         });
       });
     })();

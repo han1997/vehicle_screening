@@ -351,8 +351,7 @@
             </div>
           </div>
           <div class="select-all-bar">
-            <button type="button" class="btn btn-ghost btn-small" data-select-all="frequent_checkpoints">全选</button>
-            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="frequent_checkpoints">取消全选</button>
+            <button type="button" class="btn btn-ghost btn-small" data-toggle-all="frequent_checkpoints">全选</button>
           </div>
           <div class="checklist-panel checklist-panel-large">
             <div class="checklist-grid">
@@ -396,8 +395,7 @@
               </div>
             </div>
             <div class="select-all-bar">
-              <button type="button" class="btn btn-ghost btn-small" data-select-all="export_columns">全选</button>
-              <button type="button" class="btn btn-ghost btn-small" data-deselect-all="export_columns">取消全选</button>
+              <button type="button" class="btn btn-ghost btn-small" data-toggle-all="export_columns">全选</button>
             </div>
             <div class="checklist-panel checklist-panel-large">
               <div class="checklist-grid">
@@ -479,8 +477,7 @@
             </div>
           </div>
           <div class="select-all-bar">
-            <button type="button" class="btn btn-ghost btn-small" data-select-all="keyperson_checkpoints">全选</button>
-            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="keyperson_checkpoints">取消全选</button>
+            <button type="button" class="btn btn-ghost btn-small" data-toggle-all="keyperson_checkpoints">全选</button>
           </div>
           <div class="checklist-panel checklist-panel-large">
             <div class="checklist-grid">
@@ -515,8 +512,7 @@
             </div>
           </div>
           <div class="select-all-bar">
-            <button type="button" class="btn btn-ghost btn-small" data-select-all="keyperson_selected">全选</button>
-            <button type="button" class="btn btn-ghost btn-small" data-deselect-all="keyperson_selected">取消全选</button>
+            <button type="button" class="btn btn-ghost btn-small" data-toggle-all="keyperson_selected">全选</button>
           </div>
           <div class="checklist-panel checklist-panel-large">
             <div class="checklist-grid" data-keyperson-grid>
@@ -560,8 +556,7 @@
               </div>
             </div>
             <div class="select-all-bar">
-              <button type="button" class="btn btn-ghost btn-small" data-select-all="export_columns">全选</button>
-              <button type="button" class="btn btn-ghost btn-small" data-deselect-all="export_columns">取消全选</button>
+              <button type="button" class="btn btn-ghost btn-small" data-toggle-all="export_columns">全选</button>
             </div>
             <div class="checklist-panel checklist-panel-large">
               <div class="checklist-grid" data-keyperson-export-grid>
@@ -729,6 +724,35 @@
         Array.from(inputs).forEach(syncInputVisualState);
       }
 
+      function getVisibleCheckboxesForToggleButton(button) {
+        if (!button) return [];
+        var name = button.getAttribute("data-toggle-all");
+        if (!name) return [];
+        var scope = button.closest(".section-card") || document;
+        var checkboxes = Array.from(scope.querySelectorAll('input[type="checkbox"][name="' + name + '"]'));
+        return checkboxes.filter(function (cb) {
+          var label = cb.closest("label");
+          return !(label && label.classList.contains("check-item-hidden"));
+        });
+      }
+
+      function updateToggleAllButtonLabel(button) {
+        if (!button) return;
+        var visibleCheckboxes = getVisibleCheckboxesForToggleButton(button);
+        if (!visibleCheckboxes.length) {
+          button.textContent = "全选";
+          return;
+        }
+        var allChecked = visibleCheckboxes.every(function (cb) { return cb.checked; });
+        button.textContent = allChecked ? "取消全选" : "全选";
+      }
+
+      function updateToggleAllButtonLabels(scope) {
+        var root = scope || document;
+        var buttons = Array.from(root.querySelectorAll("button[data-toggle-all]"));
+        buttons.forEach(updateToggleAllButtonLabel);
+      }
+
       document.addEventListener("change", function (event) {
         var target = event.target;
         if (!target || !target.type) return;
@@ -744,6 +768,12 @@
           });
         } else {
           syncInputVisualState(target);
+          var section = target.closest ? target.closest(".section-card") : null;
+          if (section) {
+            updateToggleAllButtonLabels(section);
+          } else {
+            updateToggleAllButtonLabels();
+          }
         }
       });
 
@@ -817,6 +847,7 @@
           } else {
             status.textContent = "显示全部 " + items.length + " 个卡口（命中 " + totalCurrent + " 个），已勾选 " + selectedCount + " 个";
           }
+          updateToggleAllButtonLabels(section);
         }
 
         input.addEventListener("input", renderMatches);
@@ -849,6 +880,7 @@
           } else {
             status.textContent = "显示全部 " + items.length + " 个卡口（命中 " + totalCurrent + " 个），已勾选 " + selected + " 个";
           }
+          updateToggleAllButtonLabels(section);
         }
         input.addEventListener("input", render);
         checkboxes.forEach(function (cb) { cb.addEventListener("change", render); });
@@ -879,6 +911,7 @@
           } else {
             status.textContent = "显示全部 " + items.length + " 人，已勾选 " + selected + " 人";
           }
+          updateToggleAllButtonLabels(section);
         }
         input.addEventListener("input", render);
         checkboxes.forEach(function (cb) { cb.addEventListener("change", render); });
@@ -911,6 +944,8 @@
           } else {
             status.textContent = "显示全部 " + items.length + " 列，已勾选 " + selectedCount + " 列";
           }
+          var section = status.closest ? status.closest(".section-card") : null;
+          updateToggleAllButtonLabels(section || form);
         }
 
         if (input) input.addEventListener("input", renderStatus);
@@ -932,6 +967,8 @@
           function fallbackRender() {
             var cnt = fallbackInputs.filter(function (i) { return i.checked; }).length;
             status.textContent = cnt > 0 ? "已选择 " + cnt + " 列" : "未勾选时将自动使用默认列。";
+            var section = status.closest ? status.closest(".section-card") : null;
+            updateToggleAllButtonLabels(section || form);
           }
           fallbackInputs.forEach(function (i) { i.addEventListener("change", fallbackRender); });
           fallbackRender();
@@ -955,6 +992,8 @@
           } else {
             status.textContent = "显示全部 " + items.length + " 列，已勾选 " + selectedCount + " 列";
           }
+          var section = status.closest ? status.closest(".section-card") : null;
+          updateToggleAllButtonLabels(section || form);
         }
 
         if (input) input.addEventListener("input", renderStatus);
@@ -979,6 +1018,7 @@
           modeNotes.forEach(function (note) {
             note.style.display = note.dataset.modeNote === mode ? "" : "none";
           });
+          updateToggleAllButtonLabels();
         }
 
         modeInputs.forEach(function (input) { input.addEventListener("change", syncMode); });
@@ -1008,25 +1048,27 @@
           if (!filterForm) return;
           initExportColumnStatus(filterForm);
           initKeypersonExportColumnStatus(filterForm);
+        },
+        function () {
+          updateToggleAllButtonLabels();
         }
       ]);
 
-      // 全选 / 取消全选
+      // 全选 / 取消全选（单按钮切换）
       document.addEventListener("click", function (e) {
-        var selectAllName = e.target.getAttribute("data-select-all");
-        var deselectAllName = e.target.getAttribute("data-deselect-all");
-        var name = selectAllName || deselectAllName;
-        if (!name) return;
+        var toggleButton = e.target.closest ? e.target.closest("button[data-toggle-all]") : null;
+        if (!toggleButton) return;
         e.preventDefault();
 
-        var checkboxes = document.querySelectorAll('input[type="checkbox"][name="' + name + '"]');
-        var isChecked = !!selectAllName;
-        checkboxes.forEach(function (cb) {
-          var label = cb.closest("label");
-          if (label && label.classList.contains("check-item-hidden")) return;
-          cb.checked = isChecked;
+        var visibleCheckboxes = getVisibleCheckboxesForToggleButton(toggleButton);
+        if (!visibleCheckboxes.length) return;
+
+        var shouldSelectAll = visibleCheckboxes.some(function (cb) { return !cb.checked; });
+        visibleCheckboxes.forEach(function (cb) {
+          cb.checked = shouldSelectAll;
           dispatchChangeEvent(cb);
         });
+        updateToggleAllButtonLabel(toggleButton);
       });
     })();
   </script>

@@ -648,6 +648,20 @@
         }
       }
 
+      function enableEnhancedSelectionUI() {
+        var root = document.documentElement;
+        if (!root) return;
+        if (root.classList) {
+          root.classList.add("selection-ui-enhanced");
+          return;
+        }
+        if ((" " + root.className + " ").indexOf(" selection-ui-enhanced ") === -1) {
+          root.className = (root.className ? root.className + " " : "") + "selection-ui-enhanced";
+        }
+      }
+
+      enableEnhancedSelectionUI();
+
       function setClass(element, className, enabled) {
         if (!element || !element.classList) return;
         if (enabled) {
@@ -661,12 +675,35 @@
         if (!element) return;
         var eventObj;
         if (typeof Event === "function") {
-          eventObj = new Event("change", { bubbles: false });
+          eventObj = new Event("change", { bubbles: true });
         } else {
           eventObj = document.createEvent("Event");
-          eventObj.initEvent("change", false, false);
+          eventObj.initEvent("change", true, false);
         }
         element.dispatchEvent(eventObj);
+      }
+
+      function deferTask(callback) {
+        if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+          window.requestAnimationFrame(function () { callback(); });
+        } else {
+          setTimeout(callback, 16);
+        }
+      }
+
+      function runTaskQueue(tasks) {
+        var index = 0;
+
+        function runNext() {
+          if (index >= tasks.length) return;
+          var task = tasks[index++];
+          task();
+          if (index < tasks.length) {
+            deferTask(runNext);
+          }
+        }
+
+        deferTask(runNext);
       }
 
       function resolveSelectionLabel(node) {
@@ -948,18 +985,31 @@
         syncMode();
       }
 
-      document.querySelectorAll("[data-checkpoint-selector]").forEach(initCheckpointSelector);
-      document.querySelectorAll("[data-frequent-selector]").forEach(initFrequentSelector);
-      document.querySelectorAll("[data-keyperson-checkpoint-selector]").forEach(initKeypersonCheckpointSelector);
-      document.querySelectorAll("[data-keyperson-selector]").forEach(initKeypersonSelector);
-
+      syncSelectionVisualStates();
       var filterForm = document.getElementById("filter-form");
       if (filterForm) {
         initModeSwitch(filterForm);
-        initExportColumnStatus(filterForm);
-        initKeypersonExportColumnStatus(filterForm);
       }
-      syncSelectionVisualStates();
+
+      runTaskQueue([
+        function () {
+          document.querySelectorAll("[data-checkpoint-selector]").forEach(initCheckpointSelector);
+        },
+        function () {
+          document.querySelectorAll("[data-frequent-selector]").forEach(initFrequentSelector);
+        },
+        function () {
+          document.querySelectorAll("[data-keyperson-checkpoint-selector]").forEach(initKeypersonCheckpointSelector);
+        },
+        function () {
+          document.querySelectorAll("[data-keyperson-selector]").forEach(initKeypersonSelector);
+        },
+        function () {
+          if (!filterForm) return;
+          initExportColumnStatus(filterForm);
+          initKeypersonExportColumnStatus(filterForm);
+        }
+      ]);
 
       // 全选 / 取消全选
       document.addEventListener("click", function (e) {

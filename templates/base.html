@@ -646,19 +646,7 @@
         box-shadow: 0 10px 24px rgba(15, 118, 110, 0.12);
         transform: translateY(-1px);
       }
-      .choice-card:has(input[type="radio"]:checked),
       .choice-card.is-checked,
-      .check-item:has(input:checked) {
-        border-color: rgba(15, 118, 110, 0.82);
-        background: linear-gradient(
-          180deg,
-          rgba(209, 250, 241, 0.95),
-          rgba(240, 253, 250, 0.95)
-        );
-        box-shadow:
-          0 12px 24px rgba(15, 118, 110, 0.18),
-          inset 0 0 0 1px rgba(20, 184, 166, 0.2);
-      }
       .check-item.is-checked {
         border-color: rgba(15, 118, 110, 0.82);
         background: linear-gradient(
@@ -673,18 +661,33 @@
       .choice-card input[type="radio"],
       .check-item input[type="radio"],
       .check-item input[type="checkbox"] {
+        position: static;
+        width: 16px;
+        height: 16px;
+        margin: 1px 4px 0 0;
+        padding: 0;
+        border: 0;
+        flex: 0 0 auto;
+      }
+      html.selection-ui-enhanced .choice-card input[type="radio"],
+      html.selection-ui-enhanced .check-item input[type="radio"],
+      html.selection-ui-enhanced .check-item input[type="checkbox"] {
         position: absolute;
         width: 1px;
         height: 1px;
         margin: -1px;
-        padding: 0;
-        border: 0;
         clip: rect(0 0 0 0);
         overflow: hidden;
         white-space: nowrap;
       }
       .choice-card::before,
-      .check-item::before {
+      .check-item::before,
+      .choice-card::after,
+      .check-item::after {
+        content: none;
+      }
+      html.selection-ui-enhanced .choice-card::before,
+      html.selection-ui-enhanced .check-item::before {
         content: "";
         position: absolute;
         left: 14px;
@@ -697,14 +700,14 @@
         box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
         transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
       }
-      .choice-card::before {
+      html.selection-ui-enhanced .choice-card::before {
         border-radius: 999px;
       }
-      .check-item::before {
+      html.selection-ui-enhanced .check-item::before {
         border-radius: 5px;
       }
-      .choice-card::after,
-      .check-item::after {
+      html.selection-ui-enhanced .choice-card::after,
+      html.selection-ui-enhanced .check-item::after {
         content: "";
         position: absolute;
         left: 23px;
@@ -717,7 +720,7 @@
         opacity: 0;
         transition: opacity 0.14s ease, transform 0.14s ease;
       }
-      .check-item::after {
+      html.selection-ui-enhanced .check-item::after {
         width: 8px;
         height: 4px;
         border-radius: 0;
@@ -726,37 +729,19 @@
         background: transparent;
         transform: translate(-50%, -60%) rotate(-45deg) scale(0.35);
       }
-      .choice-card:has(input[type="radio"]:checked)::before,
       .choice-card.is-checked::before,
-      .check-item:has(input:checked)::before {
-        border-color: #0f766e;
-        background: linear-gradient(135deg, #0f766e, #14b8a6);
-        box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.22);
-      }
       .check-item.is-checked::before {
         border-color: #0f766e;
         background: linear-gradient(135deg, #0f766e, #14b8a6);
         box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.22);
       }
-      .choice-card:has(input[type="radio"]:checked)::after,
-      .choice-card.is-checked::after,
-      .check-item:has(input:checked)::after {
+      .choice-card.is-checked::after {
         opacity: 1;
         transform: translate(-50%, -50%) scale(1);
-      }
-      .check-item:has(input:checked)::after {
-        transform: translate(-50%, -60%) rotate(-45deg) scale(1);
       }
       .check-item.is-checked::after {
         opacity: 1;
         transform: translate(-50%, -60%) rotate(-45deg) scale(1);
-      }
-      .choice-card:has(input[type="radio"]:focus-visible),
-      .check-item:has(input:focus-visible) {
-        outline: none;
-        box-shadow:
-          0 0 0 2px rgba(255, 255, 255, 0.95),
-          0 0 0 6px rgba(15, 118, 110, 0.24);
       }
       .choice-card.is-focused,
       .check-item.is-focused {
@@ -779,14 +764,8 @@
         font-size: 12px;
         line-height: 1.5;
       }
-      .choice-card:has(input[type="radio"]:checked) strong {
-        color: #0b5d57;
-      }
       .choice-card.is-checked strong {
         color: #0b5d57;
-      }
-      .choice-card:has(input[type="radio"]:checked) > span > span {
-        color: #0f5f59;
       }
       .choice-card.is-checked > span > span {
         color: #0f5f59;
@@ -827,10 +806,6 @@
         background: rgba(255, 255, 255, 0.96);
         box-shadow: 0 8px 16px rgba(15, 118, 110, 0.08);
         transform: translateY(-1px);
-      }
-      .check-item:has(input:checked) span {
-        color: #0b5d57;
-        font-weight: 700;
       }
       .check-item.is-checked span {
         color: #0b5d57;

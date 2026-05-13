@@ -32,3 +32,6 @@ build/
 dist/
 *.spec
 _pyi_runtime/
+
+# PowerShell scripts
+*.ps1

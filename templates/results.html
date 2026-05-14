@@ -150,9 +150,9 @@
           <div class="summary-note">出现次数达到阈值的重点人数</div>
         </div>
         <div class="summary-card summary-card-safe">
-          <div class="summary-label">夜间活跃</div>
-          <div class="summary-value">{{ summary.persons_with_nighttime }}</div>
-          <div class="summary-note">存在夜间（22:00-06:00）出现的重点人数</div>
+          <div class="summary-label">时段内活跃</div>
+          <div class="summary-value">{{ summary.persons_in_time_window }}</div>
+          <div class="summary-note">在当前设置日内时段内有通行记录的重点人数</div>
         </div>
         <div class="summary-card">
           <div class="summary-label">关键指标</div>
@@ -180,7 +180,7 @@
           <span class="legend-dot blue"></span><span>低风险：&lt; 40</span>
         </div>
         <div class="toolbar-note">
-          评分规则：频率得分（0-60）+ 时段得分（0-40），夜间（22:00-06:00）占比越高分数越高。
+          评分规则：频率分（0-60，按出行天数计算，25 天为峰值，5 天与 31 天为 0 分）+ 时段分（0-40，时段内出现次数占总出现次数比例 × 40）。
         </div>
       </div>
 
@@ -191,7 +191,8 @@
               <th>车牌号</th>
               <th>姓名</th>
               <th>出现次数</th>
-              <th>夜间占比</th>
+              <th>出行天数</th>
+              <th>时段占比</th>
               <th>频率分</th>
               <th>时间分</th>
               <th>综合评分</th>
@@ -215,7 +216,8 @@
                 <td rowspan="{{ row.group_size }}">{{ row.plate }}</td>
                 <td rowspan="{{ row.group_size }}">{{ row.person_name }}</td>
                 <td rowspan="{{ row.group_size }}">{{ row.occurrence_count }}</td>
-                <td rowspan="{{ row.group_size }}">{{ "%.0f%%"|format(row.nighttime_ratio * 100) }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.outing_days }}</td>
+                <td rowspan="{{ row.group_size }}">{{ "%.0f%%"|format(row.time_window_ratio * 100) }}</td>
                 <td rowspan="{{ row.group_size }}">{{ row.frequency_score }}</td>
                 <td rowspan="{{ row.group_size }}">{{ row.time_score }}</td>
                 <td rowspan="{{ row.group_size }}">{{ row.total_score }}</td>

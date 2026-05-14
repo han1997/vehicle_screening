@@ -516,11 +516,11 @@
       }
       .summary-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        margin: 18px 0 20px;
+        margin: 14px 0 16px;
       }
       .section-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        margin-bottom: 16px;
+        margin-bottom: 12px;
       }
       .summary-card {
         border-radius: 20px;
@@ -570,16 +570,16 @@
         color: var(--text-muted);
       }
       .section-card {
-        margin-bottom: 16px;
-        padding: 18px 18px 16px;
+        margin-bottom: 12px;
+        padding: 16px;
         border-radius: 20px;
         border: 1px solid rgba(230, 221, 209, 0.88);
         background: rgba(255, 253, 250, 0.82);
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
       }
       .section-title {
-        margin: 0 0 8px;
-        font-size: 16px;
+        margin: 0 0 6px;
+        font-size: 15px;
         font-weight: 700;
         color: var(--text-main);
       }
@@ -607,8 +607,8 @@
         color: #92400e;
       }
       .section-hint {
-        margin: 0 0 14px;
-        font-size: 13px;
+        margin: 0 0 10px;
+        font-size: 12px;
         color: var(--text-muted);
       }
       .choice-row {
@@ -630,7 +630,7 @@
         display: flex;
         align-items: flex-start;
         gap: 12px;
-        padding: 14px 16px 14px 44px;
+        padding: 14px 16px;
         border-radius: 16px;
         border: 1px solid rgba(203, 213, 225, 0.95);
         background: rgba(255, 255, 255, 0.82);
@@ -642,11 +642,28 @@
         transition: border-color 0.14s ease, transform 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
       }
       .choice-card:hover {
-        border-color: rgba(15, 118, 110, 0.52);
-        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.12);
+        border-color: rgba(15, 118, 110, 0.92);
+        background: linear-gradient(
+          180deg,
+          rgba(223, 252, 244, 1),
+          rgba(236, 253, 248, 1)
+        );
+        box-shadow:
+          0 14px 28px rgba(13, 148, 136, 0.2),
+          inset 0 0 0 2px rgba(20, 184, 166, 0.24);
         transform: translateY(-1px);
       }
-      .choice-card.is-checked,
+      .choice-card.is-checked {
+        border-color: rgba(15, 118, 110, 0.96);
+        background: linear-gradient(
+          180deg,
+          rgba(204, 251, 241, 0.98),
+          rgba(236, 253, 248, 0.98)
+        );
+        box-shadow:
+          0 14px 30px rgba(15, 118, 110, 0.22),
+          inset 0 0 0 1px rgba(13, 148, 136, 0.26);
+      }
       .check-item.is-checked {
         border-color: rgba(15, 118, 110, 0.82);
         background: linear-gradient(
@@ -681,67 +698,18 @@
         white-space: nowrap;
       }
       .choice-card::before,
-      .check-item::before,
       .choice-card::after,
+      .check-item::before,
       .check-item::after {
         content: none;
       }
       html.selection-ui-enhanced .choice-card::before,
-      html.selection-ui-enhanced .check-item::before {
-        content: "";
-        position: absolute;
-        left: 14px;
-        top: 50%;
-        width: 18px;
-        height: 18px;
-        transform: translateY(-50%);
-        border: 2px solid rgba(100, 116, 139, 0.75);
-        background: #ffffff;
-        box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
-        transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
-      }
-      html.selection-ui-enhanced .choice-card::before {
-        border-radius: 999px;
-      }
-      html.selection-ui-enhanced .check-item::before {
-        border-radius: 5px;
-      }
       html.selection-ui-enhanced .choice-card::after,
-      html.selection-ui-enhanced .check-item::after {
-        content: "";
-        position: absolute;
-        left: 23px;
-        top: 50%;
-        width: 8px;
-        height: 8px;
-        transform: translate(-50%, -50%) scale(0.2);
-        border-radius: 999px;
-        background: #ffffff;
-        opacity: 0;
-        transition: opacity 0.14s ease, transform 0.14s ease;
+      html.selection-ui-enhanced .check-item::before {
+        content: none;
       }
       html.selection-ui-enhanced .check-item::after {
-        width: 8px;
-        height: 4px;
-        border-radius: 0;
-        border-left: 2px solid #ffffff;
-        border-bottom: 2px solid #ffffff;
-        background: transparent;
-        transform: translate(-50%, -60%) rotate(-45deg) scale(0.35);
-      }
-      .choice-card.is-checked::before,
-      .check-item.is-checked::before {
-        border-color: #0f766e;
-        background: linear-gradient(135deg, #0f766e, #14b8a6);
-        box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.22);
-      }
-      .choice-card.is-checked::after {
-        opacity: 1;
-        transform: translate(-50%, -50%) scale(1);
-      }
-      .check-item.is-checked::after {
-        opacity: 1;
-        transform: translate(-50%, -60%) rotate(-45deg) scale(1);
+        content: none;
       }
       .choice-card.is-focused,
       .check-item.is-focused {
@@ -765,10 +733,10 @@
         line-height: 1.5;
       }
       .choice-card.is-checked strong {
-        color: #0b5d57;
+        color: #0a5c55;
       }
       .choice-card.is-checked > span > span {
-        color: #0f5f59;
+        color: #0d6960;
       }
       .checklist-panel {
         max-height: 172px;
@@ -790,7 +758,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 10px 12px 10px 40px;
+        padding: 10px 12px;
         border-radius: 12px;
         background: rgba(248, 250, 252, 0.72);
         border: 1px solid rgba(230, 221, 209, 0.86);
@@ -802,9 +770,15 @@
         transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
       }
       .check-item:hover {
-        border-color: rgba(15, 118, 110, 0.34);
-        background: rgba(255, 255, 255, 0.96);
-        box-shadow: 0 8px 16px rgba(15, 118, 110, 0.08);
+        border-color: rgba(13, 148, 136, 0.76);
+        background: linear-gradient(
+          180deg,
+          rgba(239, 253, 249, 1),
+          rgba(251, 255, 254, 1)
+        );
+        box-shadow:
+          0 10px 20px rgba(13, 148, 136, 0.16),
+          inset 0 0 0 1px rgba(20, 184, 166, 0.2);
         transform: translateY(-1px);
       }
       .check-item.is-checked span {
@@ -967,7 +941,7 @@
       .toolbar-note {
         max-width: 440px;
         font-size: 12px;
-        line-height: 1.7;
+        line-height: 1.6;
         color: var(--text-muted);
         text-align: right;
       }

@@ -62,7 +62,7 @@ python app.py
 已安装 PyInstaller 时可跳过安装步骤：
 
 ```powershell
-.\build_exe.ps1 -SkipInstall
+.\build_exe.ps1 -SkipDepsInstall
 ```
 
 输出文件：`dist\vehicle_screening.exe`
@@ -83,6 +83,49 @@ py -3.8 -m venv .venv38
 - `-Win7Compatible` 模式会固定 `pyinstaller==5.13.2`
 - 若不是 Python 3.8，会被脚本直接拦截并提示
 - 不要通过手工下载 DLL 方式修复 `api-ms-win-core-path-l1-1-0.dll`
+
+### 6.3 一键同时生成 Win7 32/64 位安装包
+
+前提：
+
+- 已准备 Python 3.8 x64 与 x86 两套环境（例如 `.venv38` 与 `.venv38_x86`）
+- 已安装 Inno Setup 6（默认 `ISCC.exe` 路径可自动识别）
+
+执行：
+
+```powershell
+.\build_win7_dual_installers.ps1 -SkipDepsInstall
+```
+
+若 Python 环境路径不同，可显式指定：
+
+```powershell
+.\build_win7_dual_installers.ps1 `
+  -Python64Exe .\.venv38\Scripts\python.exe `
+  -Python32Exe .\.venv38_x86\Scripts\python.exe `
+  -SkipDepsInstall
+```
+
+若 Inno Setup 不在默认路径，可指定：
+
+```powershell
+.\build_win7_dual_installers.ps1 `
+  -InnoSetupCompiler "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+```
+
+若只需要生成 32/64 位 Win7 兼容 EXE，不需要安装包，可跳过 Inno Setup：
+
+```powershell
+.\build_win7_dual_installers.ps1 -SkipDepsInstall -SkipInstaller
+```
+
+输出目录：
+
+- `dist\win7_dual\<时间戳>\installer\vehicle_screening_win7_x64_setup.exe`
+- `dist\win7_dual\<时间戳>\installer\vehicle_screening_win7_x86_setup.exe`
+- `dist\win7_dual\<时间戳>\bin\vehicle_screening_win7_x64.exe`
+- `dist\win7_dual\<时间戳>\bin\vehicle_screening_win7_x86.exe`
+- `dist\win7_dual\<时间戳>\SHA256SUMS.txt`
 
 ## 7. 使用流程
 
@@ -105,7 +148,7 @@ Get-Process vehicle_screening -ErrorAction SilentlyContinue | Stop-Process -Forc
   然后重新打包：
 
 ```powershell
-.\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38\Scripts\python.exe -SkipInstall
+.\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38\Scripts\python.exe -SkipDepsInstall
 ```
 
 - 运行时报错“此文件的版本与正在运行的 Windows 版本不兼容（x86/x64）”：
@@ -122,7 +165,7 @@ wmic os get osarchitecture
 # 按实际安装路径替换 C:\Python38-32\python.exe
 C:\Python38-32\python.exe -m venv .venv38_x86
 .\.venv38_x86\Scripts\python.exe -m pip install flask pandas xlrd openpyxl pyinstaller==5.13.2
-.\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38_x86\Scripts\python.exe -SkipInstall
+.\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38_x86\Scripts\python.exe -SkipDepsInstall
 ```
 
 ## 9. 安全与数据

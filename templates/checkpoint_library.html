@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+
+{% block title %}卡口库导入与管理 - 车辆进出筛选工具{% endblock %}
+
+{% block content %}
+  <div class="step-badge">子页面 · 卡口库</div>
+  <h2>卡口库导入与管理</h2>
+  <p class="subtext">本页集中处理“卡口库导入 + 本地卡口库管理”。你可以从首页进入，也可以从配置筛选页带当前会话进入。</p>
+
+  <div class="summary-grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+    <div class="summary-card">
+      <div class="summary-label">本地卡口数</div>
+      <div class="summary-value">{{ checkpoint_library|length }}</div>
+      <div class="summary-note">本机持久化保存，可重复使用</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">当前会话</div>
+      <div class="summary-value">{% if has_active_session %}已绑定{% else %}未绑定{% endif %}</div>
+      <div class="summary-note">{% if has_active_session %}可从本次上传数据按列导入{% else %}仅支持本地库管理{% endif %}</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">会话命中卡口</div>
+      <div class="summary-value">{{ matched_checkpoints|length }}</div>
+      <div class="summary-note">仅对带会话打开时统计</div>
+    </div>
+  </div>
+
+  <section class="section-card">
+    <div class="action-strip">
+      <div class="helper-inline">
+        <a class="btn btn-ghost" href="{{ url_for('upload_form') }}">返回首页</a>
+        {% if has_active_session %}
+          <a class="btn btn-ghost" href="{{ url_for('review', data_id=data_id) }}">返回配置筛选页</a>
+        {% endif %}
+      </div>
+      <div class="toolbar-note">在本页完成导入或删除后，可直接返回筛选配置继续操作。</div>
+    </div>
+  </section>
+
+  <section class="section-card">
+    <div class="section-title">卡口库导入</div>
+    <div class="section-hint">从“当前上传会话”的原始列中提取卡口并合并到本地卡口库。</div>
+    {% if has_active_session %}
+      {% if source_columns %}
+        <form action="{{ url_for('import_checkpoint_from_uploaded', data_id=data_id) }}" method="post" class="helper-inline">
+          <input type="hidden" name="next" value="{{ self_url }}">
+          <label for="checkpoint_source_column" style="margin-bottom: 0;">导入列：</label>
+          <select name="checkpoint_source_column" id="checkpoint_source_column" style="max-width: 280px;">
+            {% for column in source_columns %}
+              <option value="{{ column }}" {% if selected_import_column == column %}selected{% endif %}>{{ column }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn btn-ghost btn-small">导入卡口库</button>
+        </form>
+      {% else %}
+        <div class="empty-note">
+          <strong>当前会话没有可导入列</strong>
+          <p>请返回首页重新上传带表头的通行记录 Excel。</p>
+        </div>
+      {% endif %}
+    {% else %}
+      <div class="empty-note">
+        <strong>当前未绑定上传会话</strong>
+        <p>如需“按列导入卡口”，请先上传通行记录后，从配置页进入本页面。</p>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="section-card">
+    <div class="section-title section-title-inline">
+      <span>本地卡口库管理</span>
+      <span class="selection-tag multi">多选删除</span>
+    </div>
+    <div class="section-hint">用于清理误导入或冗余卡口。删除后会立即生效。</div>
+    {% if checkpoint_library %}
+      <form action="{% if has_active_session %}{{ url_for('delete_checkpoints_from_library', data_id=data_id) }}{% else %}{{ url_for('delete_checkpoints_from_library') }}{% endif %}" method="post">
+        <input type="hidden" name="next" value="{{ self_url }}">
+        <div class="search-stack">
+          <input type="search" placeholder="搜索卡口名称，如：东门、收费站、出口" data-checkpoint-search>
+          <div class="search-meta">
+            <span data-checkpoint-status>正在加载...</span>
+            <span>可多选，当前库共 {{ checkpoint_library|length }} 个</span>
+          </div>
+        </div>
+        <div class="select-all-bar">
+          <button type="button" class="btn btn-ghost btn-small" data-select-all="delete_checkpoints">全选</button>
+          <button type="button" class="btn btn-ghost btn-small" data-deselect-all="delete_checkpoints">取消全选</button>
+        </div>
+        <div class="checklist-panel checklist-panel-large">
+          <div class="checklist-grid">
+            {% for checkpoint in prioritized_checkpoint_library %}
+            <label class="check-item" data-checkpoint-item data-search="{{ checkpoint|lower }}">
+              <input type="checkbox" name="delete_checkpoints" value="{{ checkpoint }}">
+              <span>{{ checkpoint }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="action-strip" style="margin-top: 12px;">
+          <div>
+            <button type="submit" class="btn btn-ghost">删除选中卡口</button>
+          </div>
+          <div class="toolbar-note">
+            删除操作仅影响本地卡口库，不会改动已上传的原始通行记录。
+          </div>
+        </div>
+      </form>
+    {% else %}
+      <div class="empty-note">
+        <strong>本地卡口库为空</strong>
+        <p>可先通过上方“卡口库导入”添加，或从配置页继续筛选。</p>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script>
+    (function () {
+      var searchInput = document.querySelector("[data-checkpoint-search]");
+      var status = document.querySelector("[data-checkpoint-status]");
+      var items = Array.from(document.querySelectorAll("[data-checkpoint-item]"));
+      var checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"][name="delete_checkpoints"]'));
+
+      function renderStatus() {
+        if (!status) return;
+        var query = searchInput ? searchInput.value.trim().toLowerCase() : "";
+        var matchedCount = 0;
+        var checkedCount = 0;
+
+        items.forEach(function (item) {
+          var text = item.dataset.search || "";
+          var matched = !query || text.includes(query);
+          item.classList.toggle("check-item-hidden", !matched);
+          if (matched) matchedCount += 1;
+        });
+
+        checkboxes.forEach(function (cb) {
+          if (cb.checked) checkedCount += 1;
+        });
+
+        if (query) {
+          status.textContent = "实时匹配 " + matchedCount + " 个，已勾选 " + checkedCount + " 个";
+        } else {
+          status.textContent = "显示全部 " + items.length + " 个，已勾选 " + checkedCount + " 个";
+        }
+      }
+
+      if (searchInput) {
+        searchInput.addEventListener("input", renderStatus);
+      }
+      checkboxes.forEach(function (cb) {
+        cb.addEventListener("change", renderStatus);
+      });
+      renderStatus();
+
+      document.addEventListener("click", function (e) {
+        var selectAllName = e.target.getAttribute("data-select-all");
+        var deselectAllName = e.target.getAttribute("data-deselect-all");
+        var name = selectAllName || deselectAllName;
+        if (!name) return;
+
+        e.preventDefault();
+        var isChecked = !!selectAllName;
+        var candidates = document.querySelectorAll('input[type="checkbox"][name="' + name + '"]');
+        candidates.forEach(function (cb) {
+          var label = cb.closest("label");
+          if (label && label.classList.contains("check-item-hidden")) return;
+          cb.checked = isChecked;
+          cb.dispatchEvent(new Event("change", { bubbles: false }));
+        });
+      });
+    })();
+  </script>
+{% endblock %}

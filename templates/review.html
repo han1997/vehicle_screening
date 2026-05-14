@@ -112,7 +112,7 @@
           <input type="radio" name="filter_mode" value="keyperson" {% if filter_mode == "keyperson" %}checked{% endif %}>
           <span>
             <strong>重点人模式</strong>
-            <span>匹配本地重点人库中的车辆，按频率和夜间时段占比进行综合风险评分。</span>
+            <span>匹配本地重点人库中的车辆，按频率和日内时段占比进行综合风险评分。</span>
           </span>
         </label>
       </div>
@@ -333,7 +333,7 @@
             </div>
           </div>
         </div>
-        <small>示例：20:00-04:00 表示夜间跨天时段。</small>
+        <small>示例：20:00-04:00 表示跨天时段。</small>
       </section>
 
       <section class="section-card" data-frequent-selector>
@@ -347,7 +347,6 @@
             <input type="search" placeholder="搜索卡口，如：东门、收费站、主路段" data-frequent-search>
             <div class="search-meta">
               <span data-frequent-status>正在加载匹配结果...</span>
-              <span>可多选，当前已勾选 {{ selected_frequent_checkpoints|length }} 个</span>
             </div>
           </div>
           <div class="select-all-bar">
@@ -391,7 +390,6 @@
               <input type="search" placeholder="搜索列名，如：车牌、时间、地点" data-frequent-export-search>
               <div class="search-meta">
                 <span data-export-column-status>正在加载...</span>
-                <span>可多选，已勾选 {{ selected_export_columns|length }} 列</span>
               </div>
             </div>
             <div class="select-all-bar">
@@ -459,7 +457,7 @@
             </div>
           </div>
         </div>
-        <small>示例：20:00-04:00 表示夜间跨天时段。</small>
+        <small>示例：20:00-04:00 表示跨天时段。</small>
       </section>
 
       <section class="section-card" data-keyperson-checkpoint-selector>
@@ -473,7 +471,6 @@
             <input type="search" placeholder="搜索卡口，如：东门、收费站、主路段" data-keyperson-checkpoint-search>
             <div class="search-meta">
               <span data-keyperson-checkpoint-status>正在加载...</span>
-              <span>可多选，已勾选 {{ selected_keyperson_checkpoints|length }} 个</span>
             </div>
           </div>
           <div class="select-all-bar">
@@ -508,7 +505,6 @@
             <input type="search" placeholder="搜索姓名、车牌号、身份证" data-keyperson-search>
             <div class="search-meta">
               <span data-keyperson-status>正在加载...</span>
-              <span>可多选，已勾选 {{ selected_keypersons|length }} 人</span>
             </div>
           </div>
           <div class="select-all-bar">
@@ -552,7 +548,6 @@
               <input type="search" placeholder="搜索列名，如：车牌、时间、地点" data-keyperson-export-search>
               <div class="search-meta">
                 <span data-keyperson-export-column-status>正在加载...</span>
-                <span>可多选，已勾选 {{ selected_export_columns|length }} 列</span>
               </div>
             </div>
             <div class="select-all-bar">
@@ -593,7 +588,7 @@
         频繁模式按日内时段筛选（支持跨天，如 20:00-04:00），并对同一车辆做聚合展示。
       </div>
       <div class="toolbar-note" data-mode-note="keyperson">
-        重点人模式按日内时段匹配重点人车牌通行记录，结合频率和夜间时段占比进行综合风险评分。
+        重点人模式按日内时段匹配重点人车牌通行记录，结合频率和时段占比进行综合风险评分。
       </div>
     </div>
   </form>

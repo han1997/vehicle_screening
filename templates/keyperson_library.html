@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+
+{% block title %}重点人导入与管理 - 车辆进出筛选工具{% endblock %}
+
+{% block content %}
+  <div class="step-badge">子页面 · 重点人库</div>
+  <h2>重点人导入与管理</h2>
+  <p class="subtext">本页集中处理“重点人导入 + 重点人管理”。从配置页进入时会绑定当前会话，删除后会同步清理会话中的已选重点人。</p>
+
+  <div class="summary-grid" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+    <div class="summary-card">
+      <div class="summary-label">重点人数</div>
+      <div class="summary-value">{{ keyperson_library|length }}</div>
+      <div class="summary-note">本地持久化，后续会话可复用</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">当前会话</div>
+      <div class="summary-value">{% if has_active_session %}已绑定{% else %}未绑定{% endif %}</div>
+      <div class="summary-note">{% if has_active_session %}删除会同步清理会话已选重点人{% else %}仅维护本地重点人库{% endif %}</div>
+    </div>
+    <div class="summary-card">
+      <div class="summary-label">会话已选人数</div>
+      <div class="summary-value">{{ selected_keypersons|length }}</div>
+      <div class="summary-note">仅对带会话打开时统计</div>
+    </div>
+  </div>
+
+  <section class="section-card">
+    <div class="action-strip">
+      <div class="helper-inline">
+        <a class="btn btn-ghost" href="{{ url_for('upload_form') }}">返回首页</a>
+        {% if has_active_session %}
+          <a class="btn btn-ghost" href="{{ url_for('review', data_id=data_id) }}">返回配置筛选页</a>
+        {% endif %}
+      </div>
+      <div class="toolbar-note">建议先在此维护重点人库，再回到筛选页进行重点人模式分析。</div>
+    </div>
+  </section>
+
+  <section class="section-card">
+    <div class="section-title">重点人导入</div>
+    <div class="section-hint">上传包含姓名、身份证、手机号、车牌号的 Excel 文件，系统将自动识别并合并入库（按车牌去重）。</div>
+
+    <form action="{% if has_active_session %}{{ url_for('import_keyperson_from_excel', data_id=data_id) }}{% else %}{{ url_for('upload_keyperson') }}{% endif %}" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="next" value="{{ self_url }}">
+      <div class="file-picker">
+        <input type="file" name="keyperson_file" accept=".xls,.xlsx" required class="file-input-native" data-keyperson-upload>
+        <div class="file-picker-main">
+          <button type="button" class="file-trigger" data-keyperson-upload-trigger>选择重点人 Excel</button>
+          <div class="file-meta" data-keyperson-upload-meta>未选择文件</div>
+        </div>
+      </div>
+      <small>建议表头包含：姓名 / 身份证 / 手机号 / 车牌号。车牌号为必需列。</small>
+
+      <div class="action-strip" style="margin-top: 14px;">
+        <div>
+          <button type="submit">导入重点人库</button>
+        </div>
+        <div class="toolbar-note">重复车牌会自动合并，不会覆盖已存在记录的核心字段。</div>
+      </div>
+    </form>
+  </section>
+
+  <section class="section-card">
+    <div class="section-title section-title-inline">
+      <span>重点人管理</span>
+      <span class="selection-tag multi">多选删除</span>
+    </div>
+    <div class="section-hint">删除后会立即生效。若带会话打开，将同步清理该会话已选择的重点人。</div>
+    {% if keyperson_library %}
+      <form action="{% if has_active_session %}{{ url_for('delete_keypersons_from_library', data_id=data_id) }}{% else %}{{ url_for('delete_keypersons_from_library') }}{% endif %}" method="post">
+        <input type="hidden" name="next" value="{{ self_url }}">
+        <div class="search-stack">
+          <input type="search" placeholder="搜索姓名、车牌号、身份证、手机号" data-keyperson-search>
+          <div class="search-meta">
+            <span data-keyperson-status>正在加载...</span>
+            <span>可多选，当前库共 {{ keyperson_library|length }} 人</span>
+          </div>
+        </div>
+        <div class="select-all-bar">
+          <button type="button" class="btn btn-ghost btn-small" data-select-all="delete_keypersons">全选</button>
+          <button type="button" class="btn btn-ghost btn-small" data-deselect-all="delete_keypersons">取消全选</button>
+        </div>
+        <div class="checklist-panel checklist-panel-large">
+          <div class="checklist-grid">
+            {% for person in keyperson_library %}
+            <label
+              class="check-item"
+              data-keyperson-item
+              data-search="{{ (person.name ~ ' ' ~ person.plate ~ ' ' ~ person.id_card ~ ' ' ~ person.phone)|lower }}"
+            >
+              <input type="checkbox" name="delete_keypersons" value="{{ person.plate }}">
+              <span>
+                {{ person.name or '未命名' }}（{{ person.plate }}）
+                {% if person.id_card %} {{ person.id_card[:6] }}...{% endif %}
+              </span>
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="action-strip" style="margin-top: 12px;">
+          <div>
+            <button type="submit" class="btn btn-ghost">删除选中重点人</button>
+          </div>
+          <div class="toolbar-note">删除仅影响本地重点人库，不会改动通行原始记录。</div>
+        </div>
+      </form>
+    {% else %}
+      <div class="empty-note">
+        <strong>本地重点人库为空</strong>
+        <p>请先通过上方“重点人导入”上传 Excel 文件。</p>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script>
+    (function () {
+      var input = document.querySelector("[data-keyperson-upload]");
+      var trigger = document.querySelector("[data-keyperson-upload-trigger]");
+      var meta = document.querySelector("[data-keyperson-upload-meta]");
+      if (input && trigger && meta) {
+        trigger.addEventListener("click", function () { input.click(); });
+        input.addEventListener("change", function () {
+          var files = Array.from(input.files || []);
+          meta.textContent = files.length ? "已选择：" + files.map(function (f) { return f.name; }).join("、") : "未选择文件";
+        });
+      }
+
+      var searchInput = document.querySelector("[data-keyperson-search]");
+      var status = document.querySelector("[data-keyperson-status]");
+      var items = Array.from(document.querySelectorAll("[data-keyperson-item]"));
+      var checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"][name="delete_keypersons"]'));
+
+      function renderStatus() {
+        if (!status) return;
+        var query = searchInput ? searchInput.value.trim().toLowerCase() : "";
+        var matchedCount = 0;
+        var checkedCount = 0;
+
+        items.forEach(function (item) {
+          var text = item.dataset.search || "";
+          var matched = !query || text.includes(query);
+          item.classList.toggle("check-item-hidden", !matched);
+          if (matched) matchedCount += 1;
+        });
+
+        checkboxes.forEach(function (cb) {
+          if (cb.checked) checkedCount += 1;
+        });
+
+        if (query) {
+          status.textContent = "实时匹配 " + matchedCount + " 人，已勾选 " + checkedCount + " 人";
+        } else {
+          status.textContent = "显示全部 " + items.length + " 人，已勾选 " + checkedCount + " 人";
+        }
+      }
+
+      if (searchInput) {
+        searchInput.addEventListener("input", renderStatus);
+      }
+      checkboxes.forEach(function (cb) {
+        cb.addEventListener("change", renderStatus);
+      });
+      renderStatus();
+
+      document.addEventListener("click", function (e) {
+        var selectAllName = e.target.getAttribute("data-select-all");
+        var deselectAllName = e.target.getAttribute("data-deselect-all");
+        var name = selectAllName || deselectAllName;
+        if (!name) return;
+
+        e.preventDefault();
+        var isChecked = !!selectAllName;
+        var candidates = document.querySelectorAll('input[type="checkbox"][name="' + name + '"]');
+        candidates.forEach(function (cb) {
+          var label = cb.closest("label");
+          if (label && label.classList.contains("check-item-hidden")) return;
+          cb.checked = isChecked;
+          cb.dispatchEvent(new Event("change", { bubbles: false }));
+        });
+      });
+    })();
+  </script>
+{% endblock %}

@@ -22,6 +22,12 @@ DEFAULT_FREQUENT_OCCURRENCE = 2
 DEFAULT_FREQUENT_START_CLOCK = "00:00"
 DEFAULT_FREQUENT_END_CLOCK = "23:59"
 DEFAULT_KEYPERSON_MIN_OCCURRENCE = 1
+# 频率评分以"出行天数"为输入，按抛物线在 5~31 天之间取值，25 天为峰值
+KEYPERSON_FREQUENCY_DAYS_PEAK = 25
+KEYPERSON_FREQUENCY_DAYS_LEFT = 5
+KEYPERSON_FREQUENCY_DAYS_RIGHT = 31
+KEYPERSON_FREQUENCY_SCORE_MAX = 60.0
+KEYPERSON_TIME_SCORE_MAX = 40.0
 SOURCE_COLUMN_PREFIX = "__source__"
 PAGE_SIZE = 100
 
@@ -793,6 +799,36 @@ def get_frequent_level(occurrence_count, threshold):
     return "blue", "达标"
 
 
+def get_keyperson_frequency_score_by_days(outing_days):
+    """
+    基于车辆出行天数计算频率分（0-60）：
+    - 峰值 25 天（60 分）
+    - 5 天与 31 天为 0 分边界（含两端及之外）
+    - 5→25 与 25→31 两段为倒置抛物线
+    """
+    days = float(outing_days or 0)
+    peak = float(KEYPERSON_FREQUENCY_DAYS_PEAK)
+    left = float(KEYPERSON_FREQUENCY_DAYS_LEFT)
+    right = float(KEYPERSON_FREQUENCY_DAYS_RIGHT)
+    if days <= left or days >= right:
+        return 0.0
+    if days <= peak:
+        score = KEYPERSON_FREQUENCY_SCORE_MAX * (1.0 - ((peak - days) / (peak - left)) ** 2)
+    else:
+        score = KEYPERSON_FREQUENCY_SCORE_MAX * (1.0 - ((days - peak) / (right - peak)) ** 2)
+    return round(max(0.0, min(KEYPERSON_FREQUENCY_SCORE_MAX, score)), 1)
+
+
+def get_keyperson_time_score_by_ratio(time_window_count, total_occurrence_count):
+    """时段分（0-40）= 时段内出现次数 / 总出现次数 × 40。"""
+    total = int(total_occurrence_count or 0)
+    if total <= 0:
+        return 0.0
+    ratio = float(time_window_count or 0) / float(total)
+    score = KEYPERSON_TIME_SCORE_MAX * max(0.0, min(1.0, ratio))
+    return round(score, 1)
+
+
 def build_results_summary(df):
     """统计筛选结果的风险分布与关键指标。"""
     summary = {"total": 0, "red": 0, "yellow": 0, "blue": 0, "max_score": 0, "avg_delta": 0.0}
@@ -1139,12 +1175,24 @@ def build_keyperson_filtered_dataframe(
 ):
     """重点人模式：匹配重点人车牌的通行记录并综合评分。"""
     keyperson_plates = set(keyperson_lookup.keys())
-    df_valid = df[df["location"].isin(set(active_checkpoints))].copy()
-    df_valid = df_valid[df_valid["plate"].isin(keyperson_plates)]
+    df_base = df[df["location"].isin(set(active_checkpoints))].copy()
+    df_base = df_base[df_base["plate"].isin(keyperson_plates)]
+    total_occurrence_map = df_base["plate"].value_counts().to_dict()
+    # 出行天数：每个车牌在所选卡口下的不同日期数（不受日内时段限制）
+    if not df_base.empty:
+        outing_days_map = (
+            df_base.assign(_date=df_base["time"].dt.date)
+            .drop_duplicates(subset=["plate", "_date"])
+            .groupby("plate")
+            .size()
+            .to_dict()
+        )
+    else:
+        outing_days_map = {}
 
     # 严格按日内时段过滤，确保结果明细只包含时段内记录
     df_valid = filter_dataframe_by_clock_window(
-        df_valid, "time", start_clock, end_clock
+        df_base, "time", start_clock, end_clock
     )
     df_valid = df_valid.sort_values("time")
     matched_records = int(len(df_valid))
@@ -1163,15 +1211,17 @@ def build_keyperson_filtered_dataframe(
         last_time = group_sorted["time"].iloc[-1]
         duration_minutes = (last_time - first_time).total_seconds() / 60.0
 
-        # 夜间时段统计（22:00-06:00）
-        hours = group_sorted["time"].dt.hour
-        nighttime_mask = (hours >= 22) | (hours < 6)
-        nighttime_count = int(nighttime_mask.sum())
-        nighttime_ratio = nighttime_count / occurrence_count if occurrence_count > 0 else 0.0
+        # 时段占比：时段内出现次数 / 该车在所选卡口的总出现次数
+        total_occurrence_count = int(total_occurrence_map.get(plate, occurrence_count))
+        time_window_count = occurrence_count
+        time_window_ratio = (
+            time_window_count / total_occurrence_count if total_occurrence_count > 0 else 0.0
+        )
+        outing_days = int(outing_days_map.get(plate, 0))
 
-        # 综合评分
-        frequency_score = min(60, occurrence_count * 12)
-        time_score = round(nighttime_ratio * 40, 1)
+        # 综合评分：频率分基于出行天数曲线，时段分基于时段内占比
+        frequency_score = get_keyperson_frequency_score_by_days(outing_days)
+        time_score = get_keyperson_time_score_by_ratio(time_window_count, total_occurrence_count)
         total_score = round(frequency_score + time_score, 1)
         level, level_label = get_keyperson_level(total_score)
 
@@ -1192,8 +1242,10 @@ def build_keyperson_filtered_dataframe(
                 "person_id_card": person_info.get("id_card", ""),
                 "person_phone": person_info.get("phone", ""),
                 "occurrence_count": occurrence_count,
-                "nighttime_count": nighttime_count,
-                "nighttime_ratio": nighttime_ratio,
+                "total_occurrence_count": total_occurrence_count,
+                "outing_days": outing_days,
+                "time_window_count": time_window_count,
+                "time_window_ratio": time_window_ratio,
                 "frequency_score": frequency_score,
                 "time_score": time_score,
                 "total_score": total_score,
@@ -1226,7 +1278,8 @@ def build_keyperson_filtered_dataframe(
     else:
         filtered_df = pd.DataFrame(columns=[
             "plate", "plate_type_summary", "person_name", "person_id_card", "person_phone",
-            "occurrence_count", "nighttime_count", "nighttime_ratio",
+            "occurrence_count", "total_occurrence_count", "outing_days",
+            "time_window_count", "time_window_ratio",
             "frequency_score", "time_score", "total_score", "level", "level_label",
             "first_time", "last_time", "duration_minutes",
             "checkpoint_count", "checkpoint_summary",
@@ -1243,11 +1296,16 @@ def build_keyperson_results_summary(df, matched_records, threshold):
         "total_persons": 0,
         "matched_records": int(matched_records),
         "threshold": int(threshold),
+        "red": 0,
+        "yellow": 0,
+        "blue": 0,
         "max_occurrence": 0,
         "avg_occurrence": 0.0,
         "max_score": 0.0,
-        "avg_nighttime_ratio": 0.0,
-        "persons_with_nighttime": 0,
+        "avg_outing_days": 0.0,
+        "max_outing_days": 0,
+        "avg_time_window_ratio": 0.0,
+        "persons_in_time_window": 0,
     }
 
     if df is None or df.empty:
@@ -1271,11 +1329,22 @@ def build_keyperson_results_summary(df, matched_records, threshold):
         if not scores.empty:
             summary["max_score"] = round(float(scores.max()), 1)
 
-    if "nighttime_ratio" in vehicle_df.columns:
-        ratios = pd.to_numeric(vehicle_df["nighttime_ratio"], errors="coerce").dropna()
+    if "level" in vehicle_df.columns:
+        level_counts = vehicle_df["level"].value_counts().to_dict()
+        for level in ("red", "yellow", "blue"):
+            summary[level] = int(level_counts.get(level, 0))
+
+    if "outing_days" in vehicle_df.columns:
+        days = pd.to_numeric(vehicle_df["outing_days"], errors="coerce").dropna()
+        if not days.empty:
+            summary["max_outing_days"] = int(days.max())
+            summary["avg_outing_days"] = round(float(days.mean()), 1)
+
+    if "time_window_ratio" in vehicle_df.columns:
+        ratios = pd.to_numeric(vehicle_df["time_window_ratio"], errors="coerce").dropna()
         if not ratios.empty:
-            summary["avg_nighttime_ratio"] = round(float(ratios.mean()), 2)
-            summary["persons_with_nighttime"] = int((ratios > 0).sum())
+            summary["avg_time_window_ratio"] = round(float(ratios.mean()), 2)
+            summary["persons_in_time_window"] = int((ratios > 0).sum())
 
     return summary
 
@@ -1368,6 +1437,11 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
                 "value": normalize_text_value(row.get(source_column_key(column), "")),
             })
 
+        time_window_count = int(row.get("time_window_count", 0) or 0)
+        time_window_ratio = float(row.get("time_window_ratio", 0.0) or 0.0)
+        outing_days = int(row.get("outing_days", 0) or 0)
+        total_occurrence_count = int(row.get("total_occurrence_count", 0) or 0)
+
         display_results.append({
             "plate": normalize_text_value(row.get("plate", "")),
             "plate_type": normalize_text_value(row.get("plate_type_summary", "")),
@@ -1375,8 +1449,10 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
             "person_id_card": normalize_text_value(row.get("person_id_card", "")),
             "person_phone": normalize_text_value(row.get("person_phone", "")),
             "occurrence_count": int(row.get("occurrence_count", 0) or 0),
-            "nighttime_count": int(row.get("nighttime_count", 0) or 0),
-            "nighttime_ratio": float(row.get("nighttime_ratio", 0.0) or 0.0),
+            "total_occurrence_count": total_occurrence_count,
+            "outing_days": outing_days,
+            "time_window_count": time_window_count,
+            "time_window_ratio": time_window_ratio,
             "frequency_score": float(row.get("frequency_score", 0.0) or 0.0),
             "time_score": float(row.get("time_score", 0.0) or 0.0),
             "total_score": float(row.get("total_score", 0.0) or 0.0),
@@ -1602,7 +1678,7 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
     export_columns = sanitize_export_columns(selected_export_columns)
     summary_columns = [
         "车牌号", "姓名", "身份证", "手机",
-        "出现次数", "夜间出现次数", "夜间占比",
+        "出现次数", "出行天数", "总出现次数", "时段内出现次数", "时段占比",
         "频率评分", "时间评分", "综合评分",
         "首次出现时间", "最后出现时间", "覆盖时长（分钟）",
         "涉及卡口数", "卡口分布", "风险等级",
@@ -1628,15 +1704,20 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
         level_label = row.get("level_label", "低风险")
         risk_levels.append(level)
 
-        nighttime_ratio = float(row.get("nighttime_ratio", 0.0) or 0.0)
+        time_window_count = int(row.get("time_window_count", 0) or 0)
+        time_window_ratio = float(row.get("time_window_ratio", 0.0) or 0.0)
+        outing_days = int(row.get("outing_days", 0) or 0)
+        total_occurrence_count = int(row.get("total_occurrence_count", 0) or 0)
         export_row = {
             "车牌号": normalize_text_value(row.get("plate", "")),
             "姓名": normalize_text_value(row.get("person_name", "")),
             "身份证": normalize_text_value(row.get("person_id_card", "")),
             "手机": normalize_text_value(row.get("person_phone", "")),
             "出现次数": int(row.get("occurrence_count", 0) or 0),
-            "夜间出现次数": int(row.get("nighttime_count", 0) or 0),
-            "夜间占比": f"{nighttime_ratio:.0%}",
+            "出行天数": outing_days,
+            "总出现次数": total_occurrence_count,
+            "时段内出现次数": time_window_count,
+            "时段占比": f"{time_window_ratio:.0%}",
             "频率评分": float(row.get("frequency_score", 0.0) or 0.0),
             "时间评分": float(row.get("time_score", 0.0) or 0.0),
             "综合评分": float(row.get("total_score", 0.0) or 0.0),

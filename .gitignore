@@ -7,6 +7,7 @@ __pycache__/
 # Virtual environment
 .venv/
 .venv38/
+.venv38_x86/
 venv/
 env/
 
@@ -18,6 +19,7 @@ uploads/
 
 # Runtime data
 checkpoint_library.json
+keyperson_library.json
 
 # OS files
 Thumbs.db
@@ -33,5 +35,8 @@ dist/
 *.spec
 _pyi_runtime/
 
-# PowerShell scripts
-*.ps1
+# Local test/debug artifacts
+review_debug.html
+review_rendered.html
+test_upload.xls
+测试.xls

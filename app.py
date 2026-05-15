@@ -2212,6 +2212,10 @@ def sanitize_export_columns(selected_export_columns):
     return [column for column in normalized if not _is_overlapping_column(column)]
 
 
+class EmptyExcelError(ValueError):
+    """Excel 文件为空时抛出，调用方可据此选择跳过。"""
+
+
 def parse_excel(path):
     """读取并标准化 Excel 数据，返回标准化数据和原始列名。"""
     plate_candidates = [
@@ -2238,7 +2242,7 @@ def parse_excel(path):
         raise ValueError(f"无法读取Excel文件: {exc}")
 
     if header_df.empty and len(header_df.columns) == 0:
-        raise ValueError("Excel 文件为空。")
+        raise EmptyExcelError("Excel 文件为空。")
 
     normalized_headers = normalize_excel_headers(header_df.columns)
     source_columns = list(normalized_headers)
@@ -2267,7 +2271,7 @@ def parse_excel(path):
         raise ValueError(f"无法读取Excel文件: {exc}")
 
     if df.empty:
-        raise ValueError("Excel 文件为空。")
+        raise EmptyExcelError("Excel 文件为空。")
 
     # 用标准化列名替换原始列名
     col_rename = {orig: norm for orig, norm in zip(header_df.columns, normalized_headers) if orig in df.columns}
@@ -2410,6 +2414,7 @@ def upload():
     source_columns = []
     source_column_set = set()
     temp_filepaths = []
+    skipped_empty = []
 
     for file in valid_files:
         filepath = save_uploaded_excel(file)
@@ -2417,6 +2422,14 @@ def upload():
 
         try:
             df_part, file_columns = parse_excel(filepath)
+        except EmptyExcelError:
+            skipped_empty.append(file.filename)
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            temp_filepaths.pop()
+            continue
         except ValueError as exc:
             for fp in temp_filepaths:
                 try:
@@ -2432,7 +2445,15 @@ def upload():
                 source_column_set.add(column)
                 source_columns.append(column)
 
+    if skipped_empty:
+        flash(f"已跳过空文件 {len(skipped_empty)} 个：{', '.join(skipped_empty)}")
+
     if not dfs:
+        for fp in temp_filepaths:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
         flash("未解析到任何有效数据。")
         return redirect(url_for("upload_form"))
 

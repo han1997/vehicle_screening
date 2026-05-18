@@ -1852,12 +1852,6 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
 
     export_df = pd.DataFrame(export_rows)
     return export_df[all_columns], merge_ranges, risk_levels
-    """将 1-based 列号转换为 Excel 列名。"""
-    result = ""
-    while index > 0:
-        index, remainder = divmod(index - 1, 26)
-        result = chr(65 + remainder) + result
-    return result
 
 
 def build_xlsx_inline_cell(ref, value, style_id):

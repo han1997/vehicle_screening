@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Python64Exe = ".\.venv38\Scripts\python.exe",
     [string]$Python32Exe = ".\.venv38_x86\Scripts\python.exe",
     [switch]$SkipDepsInstall,

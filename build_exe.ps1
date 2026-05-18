@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$SkipDepsInstall,
     [switch]$Win7Compatible,
     [string]$PythonExe

@@ -885,17 +885,21 @@ def build_frequent_results_summary(df, matched_records, threshold):
     else:
         occurrence_series = pd.Series(dtype=float)
 
-    if "checkpoint_count" in vehicle_df.columns:
-        checkpoint_series = pd.to_numeric(vehicle_df["checkpoint_count"], errors="coerce").dropna()
-    else:
-        checkpoint_series = pd.Series(dtype=float)
-
     if not occurrence_series.empty:
         summary["max_occurrence"] = int(occurrence_series.max())
         summary["avg_occurrence"] = round(float(occurrence_series.mean()), 2)
 
-    if not checkpoint_series.empty:
-        summary["multi_checkpoint_vehicles"] = int((checkpoint_series >= 2).sum())
+    if "plate" in df.columns and "event_location" in df.columns:
+        location_pairs = df[["plate", "event_location"]].copy()
+        location_pairs["event_location"] = location_pairs["event_location"].apply(normalize_text_value)
+        location_pairs = location_pairs[location_pairs["event_location"] != ""]
+        if not location_pairs.empty:
+            checkpoint_by_plate = (
+                location_pairs.drop_duplicates(subset=["plate", "event_location"])
+                .groupby("plate")
+                .size()
+            )
+            summary["multi_checkpoint_vehicles"] = int((checkpoint_by_plate >= 2).sum())
 
     return summary
 
@@ -1098,54 +1102,69 @@ def build_frequent_filtered_dataframe(
     detail_rows = []
     filtered_vehicle_count = 0
 
-    for plate, group in df_valid.groupby("plate", sort=False):
-        occurrence_count = int(len(group))
+    for plate, plate_group in df_valid.groupby("plate", sort=False):
+        occurrence_count = int(len(plate_group))
         if occurrence_count < min_occurrence:
             continue
 
         filtered_vehicle_count += 1
-        group_sorted = group.sort_values("time")
-        first_time = group_sorted["time"].iloc[0]
-        last_time = group_sorted["time"].iloc[-1]
-        duration_minutes = (last_time - first_time).total_seconds() / 60.0
+        plate_group_sorted = plate_group.sort_values("time")
+        summary_plate_type = merge_distinct_values(plate_group_sorted["plate_type"].tolist())
+        vehicle_size = int(len(plate_group_sorted))
+        vehicle_event_index = 0
 
-        checkpoint_counts = group_sorted["location"].value_counts()
-        checkpoint_summary = "、".join(
-            f"{location} × {int(count)}" for location, count in checkpoint_counts.items()
+        # 先按车牌筛选，再按"通行日期"分组展示
+        day_groups = plate_group_sorted.groupby(
+            plate_group_sorted["time"].dt.strftime("%Y-%m-%d"), sort=True
         )
-        group_size = int(len(group_sorted))
-        summary_plate_type = merge_distinct_values(group_sorted["plate_type"].tolist())
 
-        for idx, row in enumerate(group_sorted.to_dict(orient="records")):
-            detail_rows.append(
-                {
-                    "plate": plate,
-                    "plate_type_summary": summary_plate_type,
-                    "occurrence_count": occurrence_count,
-                    "first_time": first_time,
-                    "last_time": last_time,
-                    "duration_minutes": round(duration_minutes, 2),
-                    "checkpoint_count": int(checkpoint_counts.size),
-                    "checkpoint_summary": checkpoint_summary,
-                    "event_time": row.get("time"),
-                    "event_location": normalize_text_value(row.get("location")),
-                    "event_plate_type": normalize_text_value(row.get("plate_type")),
-                    "group_row_index": idx,
-                    "group_size": group_size,
-                    "group_first": idx == 0,
-                }
+        for event_date, day_group in day_groups:
+            day_group_sorted = day_group.sort_values("time")
+            day_locations = day_group_sorted["location"].apply(normalize_text_value)
+            checkpoint_counts = day_locations.value_counts()
+            checkpoint_summary = "\n".join(
+                f"{location} × {int(count)}" for location, count in checkpoint_counts.items()
             )
+            group_size = int(len(day_group_sorted))
 
-            for column in df.columns:
-                if not str(column).startswith(SOURCE_COLUMN_PREFIX):
-                    continue
-                detail_rows[-1][column] = row.get(column)
+            for idx, row in enumerate(day_group_sorted.to_dict(orient="records")):
+                event_location = normalize_text_value(row.get("location"))
+                event_same_checkpoint_count = int(checkpoint_counts.get(event_location, 0) or 0)
+
+                detail_rows.append(
+                    {
+                        "plate": plate,
+                        "plate_type_summary": summary_plate_type,
+                        "occurrence_count": occurrence_count,
+                        "event_date": normalize_text_value(event_date),
+                        "daily_occurrence_count": group_size,
+                        "checkpoint_count": int(checkpoint_counts.size),
+                        "checkpoint_summary": checkpoint_summary,
+                        "event_time": row.get("time"),
+                        "event_location": event_location,
+                        "event_same_checkpoint_count": event_same_checkpoint_count,
+                        "event_plate_type": normalize_text_value(row.get("plate_type")),
+                        "group_row_index": idx,
+                        "group_size": group_size,
+                        "group_first": idx == 0,
+                        "vehicle_row_index": vehicle_event_index,
+                        "vehicle_size": vehicle_size,
+                        "vehicle_first": vehicle_event_index == 0,
+                    }
+                )
+
+                for column in df.columns:
+                    if not str(column).startswith(SOURCE_COLUMN_PREFIX):
+                        continue
+                    detail_rows[-1][column] = row.get(column)
+
+                vehicle_event_index += 1
 
     if detail_rows:
         filtered_df = pd.DataFrame(detail_rows)
         filtered_df = filtered_df.sort_values(
-            ["occurrence_count", "checkpoint_count", "plate", "event_time"],
-            ascending=[False, False, True, True],
+            ["occurrence_count", "plate", "event_date", "event_time", "group_row_index"],
+            ascending=[False, True, True, True, True],
         )
     else:
         filtered_df = pd.DataFrame(
@@ -1153,17 +1172,20 @@ def build_frequent_filtered_dataframe(
                 "plate",
                 "plate_type_summary",
                 "occurrence_count",
-                "first_time",
-                "last_time",
-                "duration_minutes",
+                "event_date",
+                "daily_occurrence_count",
                 "checkpoint_count",
                 "checkpoint_summary",
                 "event_time",
                 "event_location",
+                "event_same_checkpoint_count",
                 "event_plate_type",
                 "group_row_index",
                 "group_size",
                 "group_first",
+                "vehicle_row_index",
+                "vehicle_size",
+                "vehicle_first",
             ]
         )
 
@@ -1178,6 +1200,7 @@ def build_keyperson_filtered_dataframe(
     df_base = df[df["location"].isin(set(active_checkpoints))].copy()
     df_base = df_base[df_base["plate"].isin(keyperson_plates)]
     total_occurrence_map = df_base["plate"].value_counts().to_dict()
+
     # 出行天数：每个车牌在所选卡口下的不同日期数（不受日内时段限制）
     if not df_base.empty:
         outing_days_map = (
@@ -1200,16 +1223,13 @@ def build_keyperson_filtered_dataframe(
     detail_rows = []
     filtered_vehicle_count = 0
 
-    for plate, group in df_valid.groupby("plate", sort=False):
-        occurrence_count = int(len(group))
+    for plate, plate_group in df_valid.groupby("plate", sort=False):
+        occurrence_count = int(len(plate_group))
         if occurrence_count < min_occurrence:
             continue
 
         filtered_vehicle_count += 1
-        group_sorted = group.sort_values("time")
-        first_time = group_sorted["time"].iloc[0]
-        last_time = group_sorted["time"].iloc[-1]
-        duration_minutes = (last_time - first_time).total_seconds() / 60.0
+        plate_group_sorted = plate_group.sort_values("time")
 
         # 时段占比：时段内出现次数 / 该车在所选卡口的总出现次数
         total_occurrence_count = int(total_occurrence_map.get(plate, occurrence_count))
@@ -1224,56 +1244,73 @@ def build_keyperson_filtered_dataframe(
         time_score = get_keyperson_time_score_by_ratio(time_window_count, total_occurrence_count)
         total_score = round(frequency_score + time_score, 1)
         level, level_label = get_keyperson_level(total_score)
-
-        checkpoint_counts = group_sorted["location"].value_counts()
-        checkpoint_summary = "、".join(
-            f"{location} × {int(count)}" for location, count in checkpoint_counts.items()
-        )
-        group_size = int(len(group_sorted))
-        summary_plate_type = merge_distinct_values(group_sorted["plate_type"].tolist())
-
+        summary_plate_type = merge_distinct_values(plate_group_sorted["plate_type"].tolist())
         person_info = keyperson_lookup.get(plate, {})
+        vehicle_size = int(len(plate_group_sorted))
+        vehicle_event_index = 0
 
-        for idx, row in enumerate(group_sorted.to_dict(orient="records")):
-            detail_rows.append({
-                "plate": plate,
-                "plate_type_summary": summary_plate_type,
-                "person_name": person_info.get("name", ""),
-                "person_id_card": person_info.get("id_card", ""),
-                "person_phone": person_info.get("phone", ""),
-                "occurrence_count": occurrence_count,
-                "total_occurrence_count": total_occurrence_count,
-                "outing_days": outing_days,
-                "time_window_count": time_window_count,
-                "time_window_ratio": time_window_ratio,
-                "frequency_score": frequency_score,
-                "time_score": time_score,
-                "total_score": total_score,
-                "level": level,
-                "level_label": level_label,
-                "first_time": first_time,
-                "last_time": last_time,
-                "duration_minutes": round(duration_minutes, 2),
-                "checkpoint_count": int(checkpoint_counts.size),
-                "checkpoint_summary": checkpoint_summary,
-                "event_time": row.get("time"),
-                "event_location": normalize_text_value(row.get("location")),
-                "event_plate_type": normalize_text_value(row.get("plate_type")),
-                "group_row_index": idx,
-                "group_size": group_size,
-                "group_first": idx == 0,
-            })
+        # 同车在不同日期拆分成多个分组
+        day_groups = plate_group_sorted.groupby(
+            plate_group_sorted["time"].dt.strftime("%Y-%m-%d"), sort=True
+        )
 
-            for column in df.columns:
-                if not str(column).startswith(SOURCE_COLUMN_PREFIX):
-                    continue
-                detail_rows[-1][column] = row.get(column)
+        for event_date, day_group in day_groups:
+            day_group_sorted = day_group.sort_values("time")
+            day_locations = day_group_sorted["location"].apply(normalize_text_value)
+            checkpoint_counts = day_locations.value_counts()
+            checkpoint_summary = "\n".join(
+                f"{location} × {int(count)}" for location, count in checkpoint_counts.items()
+            )
+            group_size = int(len(day_group_sorted))
+
+            for idx, row in enumerate(day_group_sorted.to_dict(orient="records")):
+                event_location = normalize_text_value(row.get("location"))
+                event_same_checkpoint_count = int(checkpoint_counts.get(event_location, 0) or 0)
+
+                detail_rows.append({
+                    "plate": plate,
+                    "plate_type_summary": summary_plate_type,
+                    "person_name": person_info.get("name", ""),
+                    "person_id_card": person_info.get("id_card", ""),
+                    "person_phone": person_info.get("phone", ""),
+                    "occurrence_count": occurrence_count,
+                    "total_occurrence_count": total_occurrence_count,
+                    "outing_days": outing_days,
+                    "time_window_count": time_window_count,
+                    "time_window_ratio": time_window_ratio,
+                    "frequency_score": frequency_score,
+                    "time_score": time_score,
+                    "total_score": total_score,
+                    "level": level,
+                    "level_label": level_label,
+                    "event_date": normalize_text_value(event_date),
+                    "daily_occurrence_count": group_size,
+                    "checkpoint_count": int(checkpoint_counts.size),
+                    "checkpoint_summary": checkpoint_summary,
+                    "event_time": row.get("time"),
+                    "event_location": event_location,
+                    "event_same_checkpoint_count": event_same_checkpoint_count,
+                    "event_plate_type": normalize_text_value(row.get("plate_type")),
+                    "group_row_index": idx,
+                    "group_size": group_size,
+                    "group_first": idx == 0,
+                    "vehicle_row_index": vehicle_event_index,
+                    "vehicle_size": vehicle_size,
+                    "vehicle_first": vehicle_event_index == 0,
+                })
+
+                for column in df.columns:
+                    if not str(column).startswith(SOURCE_COLUMN_PREFIX):
+                        continue
+                    detail_rows[-1][column] = row.get(column)
+
+                vehicle_event_index += 1
 
     if detail_rows:
         filtered_df = pd.DataFrame(detail_rows)
         filtered_df = filtered_df.sort_values(
-            ["total_score", "occurrence_count", "plate", "event_time"],
-            ascending=[False, False, True, True],
+            ["total_score", "occurrence_count", "plate", "event_date", "event_time", "group_row_index"],
+            ascending=[False, False, True, True, True, True],
         )
     else:
         filtered_df = pd.DataFrame(columns=[
@@ -1281,10 +1318,11 @@ def build_keyperson_filtered_dataframe(
             "occurrence_count", "total_occurrence_count", "outing_days",
             "time_window_count", "time_window_ratio",
             "frequency_score", "time_score", "total_score", "level", "level_label",
-            "first_time", "last_time", "duration_minutes",
+            "event_date", "daily_occurrence_count",
             "checkpoint_count", "checkpoint_summary",
-            "event_time", "event_location", "event_plate_type",
+            "event_time", "event_location", "event_same_checkpoint_count", "event_plate_type",
             "group_row_index", "group_size", "group_first",
+            "vehicle_row_index", "vehicle_size", "vehicle_first",
         ])
 
     return filtered_df, matched_records, filtered_vehicle_count
@@ -1387,6 +1425,8 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
         level, level_label = get_frequent_level(occurrence_count, threshold)
         group_size = int(row.get("group_size", 1) or 1)
         group_first = bool(row.get("group_first", False))
+        vehicle_size = int(row.get("vehicle_size", group_size) or group_size)
+        vehicle_first = bool(row.get("vehicle_first", group_first))
 
         detail_columns = []
         for column in display_export_columns:
@@ -1397,22 +1437,28 @@ def build_frequent_display_results(filtered_df, threshold, selected_export_colum
                 }
             )
 
+        event_date = normalize_text_value(row.get("event_date", ""))
+        if not event_date and pd.notna(row.get("event_time")):
+            event_date = pd.Timestamp(row.get("event_time")).strftime("%Y-%m-%d")
+
         display_results.append(
             {
                 "plate": normalize_text_value(row.get("plate", "")),
                 "plate_type": normalize_text_value(row.get("plate_type_summary", "")),
                 "occurrence_count": occurrence_count,
-                "first_time": format_datetime_string(row.get("first_time")),
-                "last_time": format_datetime_string(row.get("last_time")),
-                "duration_minutes": float(row.get("duration_minutes", 0.0) or 0.0),
+                "event_date": event_date,
+                "daily_occurrence_count": int(row.get("daily_occurrence_count", 0) or 0),
                 "checkpoint_count": int(row.get("checkpoint_count", 0) or 0),
                 "checkpoint_summary": normalize_text_value(row.get("checkpoint_summary", "")),
                 "event_time": format_datetime_string(row.get("event_time")),
                 "event_location": normalize_text_value(row.get("event_location", "")),
+                "event_same_checkpoint_count": int(row.get("event_same_checkpoint_count", 0) or 0),
                 "level": level,
                 "level_label": level_label,
                 "group_size": group_size,
                 "group_first": group_first,
+                "vehicle_size": vehicle_size,
+                "vehicle_first": vehicle_first,
                 "detail_columns": detail_columns,
             }
         )
@@ -1429,6 +1475,8 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
     for row in filtered_df.to_dict(orient="records"):
         group_size = int(row.get("group_size", 1) or 1)
         group_first = bool(row.get("group_first", False))
+        vehicle_size = int(row.get("vehicle_size", group_size) or group_size)
+        vehicle_first = bool(row.get("vehicle_first", group_first))
 
         detail_columns = []
         for column in display_export_columns:
@@ -1441,6 +1489,10 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
         time_window_ratio = float(row.get("time_window_ratio", 0.0) or 0.0)
         outing_days = int(row.get("outing_days", 0) or 0)
         total_occurrence_count = int(row.get("total_occurrence_count", 0) or 0)
+
+        event_date = normalize_text_value(row.get("event_date", ""))
+        if not event_date and pd.notna(row.get("event_time")):
+            event_date = pd.Timestamp(row.get("event_time")).strftime("%Y-%m-%d")
 
         display_results.append({
             "plate": normalize_text_value(row.get("plate", "")),
@@ -1456,17 +1508,19 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
             "frequency_score": float(row.get("frequency_score", 0.0) or 0.0),
             "time_score": float(row.get("time_score", 0.0) or 0.0),
             "total_score": float(row.get("total_score", 0.0) or 0.0),
-            "first_time": format_datetime_string(row.get("first_time")),
-            "last_time": format_datetime_string(row.get("last_time")),
-            "duration_minutes": float(row.get("duration_minutes", 0.0) or 0.0),
+            "event_date": event_date,
+            "daily_occurrence_count": int(row.get("daily_occurrence_count", 0) or 0),
             "checkpoint_count": int(row.get("checkpoint_count", 0) or 0),
             "checkpoint_summary": normalize_text_value(row.get("checkpoint_summary", "")),
             "event_time": format_datetime_string(row.get("event_time")),
             "event_location": normalize_text_value(row.get("event_location", "")),
+            "event_same_checkpoint_count": int(row.get("event_same_checkpoint_count", 0) or 0),
             "level": row.get("level", "blue"),
             "level_label": row.get("level_label", "低风险"),
             "group_size": group_size,
             "group_first": group_first,
+            "vehicle_size": vehicle_size,
+            "vehicle_first": vehicle_first,
             "detail_columns": detail_columns,
         })
 
@@ -1608,20 +1662,32 @@ def build_export_dataframe(filtered_df):
 def build_frequent_export_dataframe(filtered_df, selected_export_columns, threshold):
     """构造频繁出现模式导出表，并返回需要合并的单元格信息和风险级别列表。"""
     export_columns = sanitize_export_columns(selected_export_columns)
+    vehicle_summary_columns = [
+        "车牌号",
+        "号牌种类",
+        "出现次数",
+        "频次级别",
+    ]
+    day_summary_columns = [
+        "通行日期",
+        "当天出现次数",
+        "当天卡口数",
+        "当天卡口分布",
+    ]
     summary_columns = [
         "车牌号",
         "号牌种类",
         "出现次数",
-        "首次出现时间",
-        "最后出现时间",
-        "覆盖时长（分钟）",
-        "涉及卡口数",
-        "卡口分布",
+        "通行日期",
+        "当天出现次数",
+        "当天卡口数",
+        "当天卡口分布",
         "频次级别",
     ]
     detail_columns = [
         "本条抓拍时间",
         "本条卡口",
+        "当天同卡口次数",
         "本条号牌种类",
     ]
     all_columns = summary_columns + detail_columns + export_columns
@@ -1639,19 +1705,22 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
         occurrence_count = int(row.get("occurrence_count", 0) or 0)
         level, level_label = get_frequent_level(occurrence_count, threshold)
         risk_levels.append(level)
+        event_date = normalize_text_value(row.get("event_date", ""))
+        if not event_date and pd.notna(row.get("event_time")):
+            event_date = pd.Timestamp(row.get("event_time")).strftime("%Y-%m-%d")
 
         export_row = {
             "车牌号": normalize_text_value(row.get("plate", "")),
             "号牌种类": normalize_text_value(row.get("plate_type_summary", "")),
             "出现次数": occurrence_count,
-            "首次出现时间": format_datetime_string(row.get("first_time")),
-            "最后出现时间": format_datetime_string(row.get("last_time")),
-            "覆盖时长（分钟）": round(float(row.get("duration_minutes", 0.0) or 0.0), 2),
-            "涉及卡口数": int(row.get("checkpoint_count", 0) or 0),
-            "卡口分布": normalize_text_value(row.get("checkpoint_summary", "")),
+            "通行日期": event_date,
+            "当天出现次数": int(row.get("daily_occurrence_count", 0) or 0),
+            "当天卡口数": int(row.get("checkpoint_count", 0) or 0),
+            "当天卡口分布": normalize_text_value(row.get("checkpoint_summary", "")),
             "频次级别": level_label,
             "本条抓拍时间": format_datetime_string(row.get("event_time")),
             "本条卡口": normalize_text_value(row.get("event_location", "")),
+            "当天同卡口次数": int(row.get("event_same_checkpoint_count", 0) or 0),
             "本条号牌种类": normalize_text_value(row.get("event_plate_type", "")),
         }
 
@@ -1659,12 +1728,20 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
             export_row[column] = normalize_text_value(row.get(source_column_key(column), ""))
 
         export_rows.append(export_row)
+        if bool(row.get("vehicle_first", False)):
+            vehicle_size = int(row.get("vehicle_size", 1) or 1)
+            if vehicle_size > 1:
+                start_row = excel_row
+                end_row = excel_row + vehicle_size - 1
+                for column in vehicle_summary_columns:
+                    col_idx = all_columns.index(column) + 1
+                    merge_ranges.append((start_row, end_row, col_idx))
         if bool(row.get("group_first", False)):
             group_size = int(row.get("group_size", 1) or 1)
             if group_size > 1:
                 start_row = excel_row
                 end_row = excel_row + group_size - 1
-                for column in summary_columns:
+                for column in day_summary_columns:
                     col_idx = all_columns.index(column) + 1
                     merge_ranges.append((start_row, end_row, col_idx))
         excel_row += 1
@@ -1676,16 +1753,32 @@ def build_frequent_export_dataframe(filtered_df, selected_export_columns, thresh
 def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
     """构造重点人模式导出表，并返回需要合并的单元格信息和风险级别列表。"""
     export_columns = sanitize_export_columns(selected_export_columns)
+    vehicle_summary_columns = [
+        "车牌号", "姓名", "身份证", "手机",
+        "出现次数",
+        "出行天数", "总出现次数", "时段内出现次数", "时段占比",
+        "频率评分", "时间评分", "综合评分",
+        "风险等级",
+    ]
+    day_summary_columns = [
+        "通行日期",
+        "当天出现次数",
+        "当天卡口数",
+        "当天卡口分布",
+    ]
     summary_columns = [
         "车牌号", "姓名", "身份证", "手机",
-        "出现次数", "出行天数", "总出现次数", "时段内出现次数", "时段占比",
+        "出现次数",
+        "出行天数", "总出现次数", "时段内出现次数", "时段占比",
         "频率评分", "时间评分", "综合评分",
-        "首次出现时间", "最后出现时间", "覆盖时长（分钟）",
-        "涉及卡口数", "卡口分布", "风险等级",
+        "通行日期",
+        "当天出现次数",
+        "当天卡口数", "当天卡口分布", "风险等级",
     ]
     detail_columns = [
         "本条抓拍时间",
         "本条卡口",
+        "当天同卡口次数",
         "本条号牌种类",
     ]
     all_columns = summary_columns + detail_columns + export_columns
@@ -1703,6 +1796,9 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
         level = row.get("level", "blue")
         level_label = row.get("level_label", "低风险")
         risk_levels.append(level)
+        event_date = normalize_text_value(row.get("event_date", ""))
+        if not event_date and pd.notna(row.get("event_time")):
+            event_date = pd.Timestamp(row.get("event_time")).strftime("%Y-%m-%d")
 
         time_window_count = int(row.get("time_window_count", 0) or 0)
         time_window_ratio = float(row.get("time_window_ratio", 0.0) or 0.0)
@@ -1721,14 +1817,14 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
             "频率评分": float(row.get("frequency_score", 0.0) or 0.0),
             "时间评分": float(row.get("time_score", 0.0) or 0.0),
             "综合评分": float(row.get("total_score", 0.0) or 0.0),
-            "首次出现时间": format_datetime_string(row.get("first_time")),
-            "最后出现时间": format_datetime_string(row.get("last_time")),
-            "覆盖时长（分钟）": round(float(row.get("duration_minutes", 0.0) or 0.0), 2),
-            "涉及卡口数": int(row.get("checkpoint_count", 0) or 0),
-            "卡口分布": normalize_text_value(row.get("checkpoint_summary", "")),
+            "通行日期": event_date,
+            "当天出现次数": int(row.get("daily_occurrence_count", 0) or 0),
+            "当天卡口数": int(row.get("checkpoint_count", 0) or 0),
+            "当天卡口分布": normalize_text_value(row.get("checkpoint_summary", "")),
             "风险等级": level_label,
             "本条抓拍时间": format_datetime_string(row.get("event_time")),
             "本条卡口": normalize_text_value(row.get("event_location", "")),
+            "当天同卡口次数": int(row.get("event_same_checkpoint_count", 0) or 0),
             "本条号牌种类": normalize_text_value(row.get("event_plate_type", "")),
         }
 
@@ -1736,12 +1832,20 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
             export_row[column] = normalize_text_value(row.get(source_column_key(column), ""))
 
         export_rows.append(export_row)
+        if bool(row.get("vehicle_first", False)):
+            vehicle_size = int(row.get("vehicle_size", 1) or 1)
+            if vehicle_size > 1:
+                start_row = excel_row
+                end_row = excel_row + vehicle_size - 1
+                for column in vehicle_summary_columns:
+                    col_idx = all_columns.index(column) + 1
+                    merge_ranges.append((start_row, end_row, col_idx))
         if bool(row.get("group_first", False)):
             group_size = int(row.get("group_size", 1) or 1)
             if group_size > 1:
                 start_row = excel_row
                 end_row = excel_row + group_size - 1
-                for column in summary_columns:
+                for column in day_summary_columns:
                     col_idx = all_columns.index(column) + 1
                     merge_ranges.append((start_row, end_row, col_idx))
         excel_row += 1
@@ -1767,6 +1871,18 @@ def build_xlsx_inline_cell(ref, value, style_id):
         f'<is><t xml:space="preserve">{escape(text)}</t></is>'
         f"</c>"
     )
+
+
+def _calc_excel_row_height(values, base_height=24, line_height=14):
+    """根据单元格换行数估算行高，至少返回 base_height。"""
+    max_lines = 1
+    for value in values:
+        if value is None or pd.isna(value):
+            continue
+        lines = str(value).count("\n") + 1
+        if lines > max_lines:
+            max_lines = lines
+    return max(base_height, int(base_height + (max_lines - 1) * line_height))
 
 
 # ---- OOXML 模板常量（build_warning_workbook / build_frequent_warning_workbook 共用） ----
@@ -1890,11 +2006,13 @@ def build_warning_workbook(export_df, risk_levels, summary):
     ):
         style_id = RISK_LEVEL_META.get(level, {}).get("style", 0)
         data_cells = []
+        row_values = list(row)
         for col_index, value in enumerate(row, start=1):
             cell_ref = f"{excel_column_name(col_index)}{row_index}"
             data_cells.append(build_xlsx_inline_cell(cell_ref, value, style_id))
+        row_height = _calc_excel_row_height(row_values)
         row_parts.append(
-            f'<row r="{row_index}" ht="24" customHeight="1">{"".join(data_cells)}</row>'
+            f'<row r="{row_index}" ht="{row_height}" customHeight="1">{"".join(data_cells)}</row>'
         )
 
     merge_refs = (
@@ -1996,11 +2114,13 @@ def build_frequent_warning_workbook(export_df, risk_levels, summary, merge_range
     ):
         style_id = RISK_LEVEL_META.get(level, {}).get("style", 0)
         data_cells = []
+        row_values = list(row)
         for col_index, value in enumerate(row, start=1):
             cell_ref = f"{excel_column_name(col_index)}{row_index}"
             data_cells.append(build_xlsx_inline_cell(cell_ref, value, style_id))
+        row_height = _calc_excel_row_height(row_values)
         row_parts.append(
-            f'<row r="{row_index}" ht="24" customHeight="1">{"".join(data_cells)}</row>'
+            f'<row r="{row_index}" ht="{row_height}" customHeight="1">{"".join(data_cells)}</row>'
         )
 
     merge_cell_parts = [
@@ -2106,11 +2226,13 @@ def build_keyperson_warning_workbook(export_df, risk_levels, summary, merge_rang
     ):
         style_id = RISK_LEVEL_META.get(level, {}).get("style", 0)
         data_cells = []
+        row_values = list(row)
         for col_index, value in enumerate(row, start=1):
             cell_ref = f"{excel_column_name(col_index)}{row_index}"
             data_cells.append(build_xlsx_inline_cell(cell_ref, value, style_id))
+        row_height = _calc_excel_row_height(row_values)
         row_parts.append(
-            f'<row r="{row_index}" ht="24" customHeight="1">{"".join(data_cells)}</row>'
+            f'<row r="{row_index}" ht="{row_height}" customHeight="1">{"".join(data_cells)}</row>'
         )
 
     merge_cell_parts = [
@@ -2188,8 +2310,10 @@ def build_keyperson_warning_workbook(export_df, risk_levels, summary, merge_rang
 # 与频繁模式内置列语义重叠的候选词，用于过滤导出列中的重复项
 _OVERLAP_CANDIDATES = {
     "plate": ["车牌号", "车牌号码", "车牌", "号牌号码", "plate", "plate_no", "license_plate"],
+    "date": ["通行日期", "日期", "date"],
     "time": ["抓拍时间", "本条抓拍时间", "通过时间", "时间", "通行时间", "capture_time", "time", "timestamp"],
     "location": ["抓拍地点", "本条卡口", "地点", "位置", "地点名称", "location", "site"],
+    "same_checkpoint_count": ["当天同卡口次数", "同卡口次数", "same_checkpoint_count"],
     "plate_type": ["号牌种类", "本条号牌种类", "号牌类型", "车牌种类", "车牌类型", "plate_type", "plate_kind"],
 }
 

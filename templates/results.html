@@ -52,7 +52,7 @@
           <span class="legend-dot blue"></span><span>达标：刚好达到阈值</span>
         </div>
         <div class="toolbar-note">
-          车辆级字段会按同车记录做跨行合并展示，每条抓拍明细保持独立显示。
+          车辆级字段会按同车同日记录做跨行合并展示，每条抓拍明细保持独立显示。
         </div>
       </div>
 
@@ -63,14 +63,14 @@
               <th>车牌号</th>
               <th>号牌种类</th>
               <th>出现次数</th>
-              <th>首次出现时间</th>
-              <th>最后出现时间</th>
-              <th>覆盖时长（分钟）</th>
-              <th>涉及卡口数</th>
-              <th>卡口分布</th>
+              <th>通行日期</th>
+              <th>当天出现次数</th>
+              <th>当天卡口数</th>
+              <th>当天卡口分布</th>
               <th>频次级别</th>
               <th>本条抓拍时间</th>
               <th>本条抓拍地点</th>
+              <th>当天同卡口次数</th>
               {% for item in results[0].detail_columns %}
                 <th>{{ item.name }}</th>
               {% endfor %}
@@ -79,19 +79,23 @@
           <tbody>
             {% for row in results %}
             <tr class="score-{{ row.level }}">
+              {% if row.vehicle_first %}
+                <td rowspan="{{ row.vehicle_size }}">{{ row.plate }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.plate_type }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.occurrence_count }}</td>
+              {% endif %}
               {% if row.group_first %}
-                <td rowspan="{{ row.group_size }}">{{ row.plate }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.plate_type }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.occurrence_count }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.first_time }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.last_time }}</td>
-                <td rowspan="{{ row.group_size }}">{{ "%.2f"|format(row.duration_minutes) }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.event_date }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.daily_occurrence_count }}</td>
                 <td rowspan="{{ row.group_size }}">{{ row.checkpoint_count }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_summary }}</td>
-                <td rowspan="{{ row.group_size }}"><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
+                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_summary|e|replace('\n', '<br>')|safe }}</td>
+              {% endif %}
+              {% if row.vehicle_first %}
+                <td rowspan="{{ row.vehicle_size }}"><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
               {% endif %}
               <td>{{ row.event_time }}</td>
               <td>{{ row.event_location }}</td>
+              <td>{{ row.event_same_checkpoint_count }}</td>
               {% for item in row.detail_columns %}
                 <td>{{ item.value }}</td>
               {% endfor %}
@@ -192,18 +196,19 @@
               <th>姓名</th>
               <th>出现次数</th>
               <th>出行天数</th>
+              <th>时段内出现次数</th>
               <th>时段占比</th>
               <th>频率分</th>
               <th>时间分</th>
               <th>综合评分</th>
-              <th>首次时间</th>
-              <th>最后时间</th>
-              <th>覆盖时长</th>
-              <th>卡口数</th>
-              <th>卡口分布</th>
+              <th>通行日期</th>
+              <th>当天出现次数</th>
+              <th>当天卡口数</th>
+              <th>当天卡口分布</th>
               <th>风险等级</th>
               <th>本条抓拍时间</th>
               <th>本条卡口</th>
+              <th>当天同卡口次数</th>
               {% for item in results[0].detail_columns %}
                 <th>{{ item.name }}</th>
               {% endfor %}
@@ -212,24 +217,29 @@
           <tbody>
             {% for row in results %}
             <tr class="score-{{ row.level }}">
+              {% if row.vehicle_first %}
+                <td rowspan="{{ row.vehicle_size }}">{{ row.plate }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.person_name }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.occurrence_count }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.outing_days }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.time_window_count }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ "%.0f%%"|format(row.time_window_ratio * 100) }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.frequency_score }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.time_score }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.total_score }}</td>
+              {% endif %}
               {% if row.group_first %}
-                <td rowspan="{{ row.group_size }}">{{ row.plate }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.person_name }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.occurrence_count }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.outing_days }}</td>
-                <td rowspan="{{ row.group_size }}">{{ "%.0f%%"|format(row.time_window_ratio * 100) }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.frequency_score }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.time_score }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.total_score }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.first_time }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.last_time }}</td>
-                <td rowspan="{{ row.group_size }}">{{ "%.2f"|format(row.duration_minutes) }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.event_date }}</td>
+                <td rowspan="{{ row.group_size }}">{{ row.daily_occurrence_count }}</td>
                 <td rowspan="{{ row.group_size }}">{{ row.checkpoint_count }}</td>
-                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_summary }}</td>
-                <td rowspan="{{ row.group_size }}"><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
+                <td rowspan="{{ row.group_size }}">{{ row.checkpoint_summary|e|replace('\n', '<br>')|safe }}</td>
+              {% endif %}
+              {% if row.vehicle_first %}
+                <td rowspan="{{ row.vehicle_size }}"><span class="risk-badge risk-{{ row.level }}">{{ row.level_label }}</span></td>
               {% endif %}
               <td>{{ row.event_time }}</td>
               <td>{{ row.event_location }}</td>
+              <td>{{ row.event_same_checkpoint_count }}</td>
               {% for item in row.detail_columns %}
                 <td>{{ item.value }}</td>
               {% endfor %}

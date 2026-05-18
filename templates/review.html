@@ -298,38 +298,60 @@
         <div class="clock-grid">
           <div class="clock-card">
             <div class="clock-card-title">开始时间</div>
-            <div class="clock-row">
-              <select name="frequent_start_hour" class="clock-select">
-                {% for hour in range(24) %}
-                  {% set hour_text = "%02d"|format(hour) %}
-                  <option value="{{ hour_text }}" {% if frequent_start_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
-                {% endfor %}
-              </select>
-              <span class="clock-colon">:</span>
-              <select name="frequent_start_minute" class="clock-select">
-                {% for minute in range(60) %}
-                  {% set minute_text = "%02d"|format(minute) %}
-                  <option value="{{ minute_text }}" {% if frequent_start_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
-                {% endfor %}
-              </select>
+            <div class="clock-pad">
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">小时</div>
+                <div class="clock-pad-grid clock-pad-grid-hours">
+                  {% for hour in range(24) %}
+                    {% set hour_text = "%02d"|format(hour) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="frequent_start_hour" value="{{ hour_text }}" {% if frequent_start_hour_value == hour_text %}checked{% endif %}>
+                      <span>{{ hour_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">分钟</div>
+                <div class="clock-pad-grid clock-pad-grid-minutes">
+                  {% for minute in range(60) %}
+                    {% set minute_text = "%02d"|format(minute) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="frequent_start_minute" value="{{ minute_text }}" {% if frequent_start_minute_value == minute_text %}checked{% endif %}>
+                      <span>{{ minute_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
             </div>
           </div>
           <div class="clock-card">
             <div class="clock-card-title">结束时间</div>
-            <div class="clock-row">
-              <select name="frequent_end_hour" class="clock-select">
-                {% for hour in range(24) %}
-                  {% set hour_text = "%02d"|format(hour) %}
-                  <option value="{{ hour_text }}" {% if frequent_end_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
-                {% endfor %}
-              </select>
-              <span class="clock-colon">:</span>
-              <select name="frequent_end_minute" class="clock-select">
-                {% for minute in range(60) %}
-                  {% set minute_text = "%02d"|format(minute) %}
-                  <option value="{{ minute_text }}" {% if frequent_end_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
-                {% endfor %}
-              </select>
+            <div class="clock-pad">
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">小时</div>
+                <div class="clock-pad-grid clock-pad-grid-hours">
+                  {% for hour in range(24) %}
+                    {% set hour_text = "%02d"|format(hour) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="frequent_end_hour" value="{{ hour_text }}" {% if frequent_end_hour_value == hour_text %}checked{% endif %}>
+                      <span>{{ hour_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">分钟</div>
+                <div class="clock-pad-grid clock-pad-grid-minutes">
+                  {% for minute in range(60) %}
+                    {% set minute_text = "%02d"|format(minute) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="frequent_end_minute" value="{{ minute_text }}" {% if frequent_end_minute_value == minute_text %}checked{% endif %}>
+                      <span>{{ minute_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -422,38 +444,60 @@
         <div class="clock-grid">
           <div class="clock-card">
             <div class="clock-card-title">开始时间</div>
-            <div class="clock-row">
-              <select name="keyperson_start_hour" class="clock-select">
-                {% for hour in range(24) %}
-                  {% set hour_text = "%02d"|format(hour) %}
-                  <option value="{{ hour_text }}" {% if keyperson_start_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
-                {% endfor %}
-              </select>
-              <span class="clock-colon">:</span>
-              <select name="keyperson_start_minute" class="clock-select">
-                {% for minute in range(60) %}
-                  {% set minute_text = "%02d"|format(minute) %}
-                  <option value="{{ minute_text }}" {% if keyperson_start_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
-                {% endfor %}
-              </select>
+            <div class="clock-pad">
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">小时</div>
+                <div class="clock-pad-grid clock-pad-grid-hours">
+                  {% for hour in range(24) %}
+                    {% set hour_text = "%02d"|format(hour) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="keyperson_start_hour" value="{{ hour_text }}" {% if keyperson_start_hour_value == hour_text %}checked{% endif %}>
+                      <span>{{ hour_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">分钟</div>
+                <div class="clock-pad-grid clock-pad-grid-minutes">
+                  {% for minute in range(60) %}
+                    {% set minute_text = "%02d"|format(minute) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="keyperson_start_minute" value="{{ minute_text }}" {% if keyperson_start_minute_value == minute_text %}checked{% endif %}>
+                      <span>{{ minute_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
             </div>
           </div>
           <div class="clock-card">
             <div class="clock-card-title">结束时间</div>
-            <div class="clock-row">
-              <select name="keyperson_end_hour" class="clock-select">
-                {% for hour in range(24) %}
-                  {% set hour_text = "%02d"|format(hour) %}
-                  <option value="{{ hour_text }}" {% if keyperson_end_hour_value == hour_text %}selected{% endif %}>{{ hour_text }}</option>
-                {% endfor %}
-              </select>
-              <span class="clock-colon">:</span>
-              <select name="keyperson_end_minute" class="clock-select">
-                {% for minute in range(60) %}
-                  {% set minute_text = "%02d"|format(minute) %}
-                  <option value="{{ minute_text }}" {% if keyperson_end_minute_value == minute_text %}selected{% endif %}>{{ minute_text }}</option>
-                {% endfor %}
-              </select>
+            <div class="clock-pad">
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">小时</div>
+                <div class="clock-pad-grid clock-pad-grid-hours">
+                  {% for hour in range(24) %}
+                    {% set hour_text = "%02d"|format(hour) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="keyperson_end_hour" value="{{ hour_text }}" {% if keyperson_end_hour_value == hour_text %}checked{% endif %}>
+                      <span>{{ hour_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">分钟</div>
+                <div class="clock-pad-grid clock-pad-grid-minutes">
+                  {% for minute in range(60) %}
+                    {% set minute_text = "%02d"|format(minute) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="keyperson_end_minute" value="{{ minute_text }}" {% if keyperson_end_minute_value == minute_text %}checked{% endif %}>
+                      <span>{{ minute_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
             </div>
           </div>
         </div>

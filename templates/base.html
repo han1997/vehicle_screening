@@ -829,6 +829,65 @@
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.96);
       }
+      .clock-pad {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .clock-pad-section {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .clock-pad-label {
+        font-size: 11px;
+        color: var(--text-muted);
+        letter-spacing: 0.04em;
+      }
+      .clock-pad-grid {
+        display: grid;
+        gap: 2px;
+      }
+      .clock-pad-grid-hours {
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+      }
+      .clock-pad-grid-minutes {
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+      }
+      .clock-pad-cell {
+        position: relative;
+        display: block;
+        cursor: pointer;
+      }
+      .clock-pad-cell input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+        width: 0;
+        height: 0;
+      }
+      .clock-pad-cell span {
+        display: block;
+        text-align: center;
+        padding: 3px 0;
+        font-size: 11px;
+        line-height: 1.1;
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.85);
+        border: 1px solid rgba(230, 221, 209, 0.9);
+        color: var(--text-muted);
+        transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+      }
+      .clock-pad-cell:hover span {
+        border-color: var(--primary);
+        color: var(--primary);
+      }
+      .clock-pad-cell input:checked + span {
+        background: var(--primary);
+        color: #fff;
+        border-color: var(--primary);
+        font-weight: 700;
+      }
       .file-picker {
         border: 1px solid rgba(230, 221, 209, 0.92);
         border-radius: 18px;

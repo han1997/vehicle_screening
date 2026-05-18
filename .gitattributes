@@ -2,7 +2,9 @@
 * text=auto eol=lf
 
 # Force CRLF for Windows-only files
-*.ps1   text eol=crlf
+# PowerShell 5.1 default-decodes scripts as system ANSI (GBK on zh-CN),
+# garbling UTF-8 multibyte chars. UTF-8 BOM forces correct decoding.
+*.ps1   text eol=crlf working-tree-encoding=UTF-8-BOM
 *.bat   text eol=crlf
 *.cmd   text eol=crlf
 

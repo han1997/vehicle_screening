@@ -22,8 +22,8 @@ DEFAULT_FREQUENT_OCCURRENCE = 2
 DEFAULT_FREQUENT_START_CLOCK = "00:00"
 DEFAULT_FREQUENT_END_CLOCK = "23:59"
 DEFAULT_KEYPERSON_MIN_OCCURRENCE = 1
-# 频率评分以"时段内出行天数"为输入，按抛物线在 5~31 天之间取值，15 天为峰值
-KEYPERSON_FREQUENCY_DAYS_PEAK = 25
+# 频率评分以"时段内出行天数"为输入，按抛物线在 LEFT~RIGHT 天之间取值，PEAK 天处为满分；PEAK 默认 25 可在重点人模式页面配置
+DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK = 25
 KEYPERSON_FREQUENCY_DAYS_LEFT = 5
 KEYPERSON_FREQUENCY_DAYS_RIGHT = 31
 KEYPERSON_FREQUENCY_SCORE_MAX = 60.0
@@ -799,23 +799,29 @@ def get_frequent_level(occurrence_count, threshold):
     return "blue", "达标"
 
 
-def get_keyperson_frequency_score_by_days(outing_days):
+def get_keyperson_frequency_score_by_days(outing_days, peak_days=None):
     """
     基于车辆出行天数计算频率分（0-60）：
-    - 峰值 KEYPERSON_FREQUENCY_DAYS_PEAK 天（60 分）
+    - 峰值 peak_days 天（60 分），默认使用 DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
     - KEYPERSON_FREQUENCY_DAYS_LEFT 与 KEYPERSON_FREQUENCY_DAYS_RIGHT 为 0 分边界（含两端及之外）
     - 峰值左右两段为倒置抛物线
     """
     days = float(outing_days or 0)
-    peak = float(KEYPERSON_FREQUENCY_DAYS_PEAK)
+    peak = float(peak_days if peak_days is not None else DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK)
     left = float(KEYPERSON_FREQUENCY_DAYS_LEFT)
     right = float(KEYPERSON_FREQUENCY_DAYS_RIGHT)
     if days <= left or days >= right:
         return 0.0
     if days <= peak:
-        score = KEYPERSON_FREQUENCY_SCORE_MAX * (1.0 - ((peak - days) / (peak - left)) ** 2)
+        denom = peak - left
+        if denom <= 0:
+            return KEYPERSON_FREQUENCY_SCORE_MAX if days >= peak else 0.0
+        score = KEYPERSON_FREQUENCY_SCORE_MAX * (1.0 - ((peak - days) / denom) ** 2)
     else:
-        score = KEYPERSON_FREQUENCY_SCORE_MAX * (1.0 - ((days - peak) / (right - peak)) ** 2)
+        denom = right - peak
+        if denom <= 0:
+            return KEYPERSON_FREQUENCY_SCORE_MAX if days <= peak else 0.0
+        score = KEYPERSON_FREQUENCY_SCORE_MAX * (1.0 - ((days - peak) / denom) ** 2)
     return round(max(0.0, min(KEYPERSON_FREQUENCY_SCORE_MAX, score)), 1)
 
 
@@ -1194,6 +1200,7 @@ def build_frequent_filtered_dataframe(
 
 def build_keyperson_filtered_dataframe(
     df, start_clock, end_clock, active_checkpoints, keyperson_lookup, min_occurrence,
+    frequency_days_peak=None,
 ):
     """重点人模式：匹配重点人车牌的通行记录并综合评分。"""
     keyperson_plates = set(keyperson_lookup.keys())
@@ -1253,7 +1260,9 @@ def build_keyperson_filtered_dataframe(
         time_window_outing_days = int(time_window_outing_days_map.get(plate, 0))
 
         # 综合评分：频率分基于"时段内出行天数"曲线，时段分基于时段内占比
-        frequency_score = get_keyperson_frequency_score_by_days(time_window_outing_days)
+        frequency_score = get_keyperson_frequency_score_by_days(
+            time_window_outing_days, peak_days=frequency_days_peak,
+        )
         time_score = get_keyperson_time_score_by_ratio(time_window_count, total_occurrence_count)
         total_score = round(frequency_score + time_score, 1)
         level, level_label = get_keyperson_level(total_score)
@@ -3098,6 +3107,16 @@ def review(data_id):
     if keyperson_min_occurrence <= 0:
         keyperson_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
 
+    keyperson_frequency_days_peak = config.get(
+        "keyperson_frequency_days_peak", DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK,
+    )
+    try:
+        keyperson_frequency_days_peak = int(keyperson_frequency_days_peak)
+    except (TypeError, ValueError):
+        keyperson_frequency_days_peak = DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+    if not (KEYPERSON_FREQUENCY_DAYS_LEFT < keyperson_frequency_days_peak < KEYPERSON_FREQUENCY_DAYS_RIGHT):
+        keyperson_frequency_days_peak = DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+
     _touch_session(data_id)
     return render_template(
         "review.html",
@@ -3134,6 +3153,9 @@ def review(data_id):
         selected_keyperson_checkpoints=selected_keyperson_checkpoints,
         selected_keypersons=selected_keypersons,
         keyperson_min_occurrence=keyperson_min_occurrence,
+        keyperson_frequency_days_peak=keyperson_frequency_days_peak,
+        keyperson_frequency_days_left=KEYPERSON_FREQUENCY_DAYS_LEFT,
+        keyperson_frequency_days_right=KEYPERSON_FREQUENCY_DAYS_RIGHT,
         keyperson_start_clock_value=keyperson_start_clock_value,
         keyperson_end_clock_value=keyperson_end_clock_value,
         keyperson_start_hour_value=keyperson_start_hour_value,
@@ -3372,6 +3394,16 @@ def filter_results(data_id):
         if kp_min_occurrence <= 0:
             kp_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
 
+        kp_frequency_days_peak = request.form.get("keyperson_frequency_days_peak", type=int)
+        if kp_frequency_days_peak is None:
+            kp_frequency_days_peak = DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+        if not (KEYPERSON_FREQUENCY_DAYS_LEFT < kp_frequency_days_peak < KEYPERSON_FREQUENCY_DAYS_RIGHT):
+            flash(
+                f"频率分峰值天数必须位于 {KEYPERSON_FREQUENCY_DAYS_LEFT + 1} 到 "
+                f"{KEYPERSON_FREQUENCY_DAYS_RIGHT - 1} 天之间。"
+            )
+            return redirect(url_for("review", data_id=data_id))
+
         kp_start_clock_str = normalize_text_value(request.form.get("keyperson_start_clock"))
         kp_end_clock_str = normalize_text_value(request.form.get("keyperson_end_clock"))
         if not kp_start_clock_str:
@@ -3403,6 +3435,7 @@ def filter_results(data_id):
             active_checkpoints=kp_active_checkpoints,
             keyperson_lookup=keyperson_lookup,
             min_occurrence=kp_min_occurrence,
+            frequency_days_peak=kp_frequency_days_peak,
         )
         summary = build_keyperson_results_summary(
             filtered_df, matched_records=matched_records, threshold=kp_min_occurrence,
@@ -3415,6 +3448,7 @@ def filter_results(data_id):
             "keyperson_checkpoints": kp_selected_checkpoints,
             "keyperson_selected": list(keyperson_lookup.keys()),
             "keyperson_min_occurrence": kp_min_occurrence,
+            "keyperson_frequency_days_peak": kp_frequency_days_peak,
             "keyperson_start_clock": kp_start_clock.strftime("%H:%M"),
             "keyperson_end_clock": kp_end_clock.strftime("%H:%M"),
             "export_columns": selected_export_columns,
@@ -3594,6 +3628,11 @@ def show_results(data_id):
         has_prev=has_prev,
         has_next=has_next,
         total_results=len(display_results),
+        keyperson_frequency_days_peak=int(
+            config.get("keyperson_frequency_days_peak", DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK) or DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+        ),
+        keyperson_frequency_days_left=KEYPERSON_FREQUENCY_DAYS_LEFT,
+        keyperson_frequency_days_right=KEYPERSON_FREQUENCY_DAYS_RIGHT,
     )
 
 

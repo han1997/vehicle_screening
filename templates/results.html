@@ -179,12 +179,12 @@
       <div class="results-toolbar" style="margin-bottom: 12px;">
         <div class="legend">
           <span>风险标记：</span>
-          <span class="legend-dot red"></span><span>高风险：综合评分 ≥ 70</span>
-          <span class="legend-dot yellow"></span><span>中风险：40-69</span>
+          <span class="legend-dot red"></span><span>高风险：综合评分 ≥ 60</span>
+          <span class="legend-dot yellow"></span><span>中风险：40-59</span>
           <span class="legend-dot blue"></span><span>低风险：&lt; 40</span>
         </div>
         <div class="toolbar-note">
-          评分规则：频率分（0-60，按出行天数计算，25 天为峰值，5 天与 31 天为 0 分）+ 时段分（0-40，时段内出现次数占总出现次数比例 × 40）。
+          评分规则：频率分（0-60，按时段内出行天数计算，15 天为峰值，5 天与 31 天为 0 分）+ 时段分（0-40，时段内出现次数占总出现次数比例 × 40）。
         </div>
       </div>
 
@@ -194,8 +194,8 @@
             <tr>
               <th>车牌号</th>
               <th>姓名</th>
-              <th>出现次数</th>
               <th>出行天数</th>
+              <th>时段内出行天数</th>
               <th>时段内出现次数</th>
               <th>时段占比</th>
               <th>频率分</th>
@@ -220,8 +220,8 @@
               {% if row.vehicle_first %}
                 <td rowspan="{{ row.vehicle_size }}">{{ row.plate }}</td>
                 <td rowspan="{{ row.vehicle_size }}">{{ row.person_name }}</td>
-                <td rowspan="{{ row.vehicle_size }}">{{ row.occurrence_count }}</td>
                 <td rowspan="{{ row.vehicle_size }}">{{ row.outing_days }}</td>
+                <td rowspan="{{ row.vehicle_size }}">{{ row.time_window_outing_days }}</td>
                 <td rowspan="{{ row.vehicle_size }}">{{ row.time_window_count }}</td>
                 <td rowspan="{{ row.vehicle_size }}">{{ "%.0f%%"|format(row.time_window_ratio * 100) }}</td>
                 <td rowspan="{{ row.vehicle_size }}">{{ row.frequency_score }}</td>

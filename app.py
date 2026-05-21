@@ -22,7 +22,7 @@ DEFAULT_FREQUENT_OCCURRENCE = 2
 DEFAULT_FREQUENT_START_CLOCK = "00:00"
 DEFAULT_FREQUENT_END_CLOCK = "23:59"
 DEFAULT_KEYPERSON_MIN_OCCURRENCE = 1
-# 频率评分以"出行天数"为输入，按抛物线在 5~31 天之间取值，25 天为峰值
+# 频率评分以"时段内出行天数"为输入，按抛物线在 5~31 天之间取值，15 天为峰值
 KEYPERSON_FREQUENCY_DAYS_PEAK = 25
 KEYPERSON_FREQUENCY_DAYS_LEFT = 5
 KEYPERSON_FREQUENCY_DAYS_RIGHT = 31
@@ -726,7 +726,7 @@ def parse_keyperson_excel(path):
 
 def get_keyperson_level(total_score):
     """根据综合评分返回重点人风险等级。"""
-    if total_score >= 70:
+    if total_score >= 60:
         return "red", "高风险"
     if total_score >= 40:
         return "yellow", "中风险"
@@ -802,9 +802,9 @@ def get_frequent_level(occurrence_count, threshold):
 def get_keyperson_frequency_score_by_days(outing_days):
     """
     基于车辆出行天数计算频率分（0-60）：
-    - 峰值 25 天（60 分）
-    - 5 天与 31 天为 0 分边界（含两端及之外）
-    - 5→25 与 25→31 两段为倒置抛物线
+    - 峰值 KEYPERSON_FREQUENCY_DAYS_PEAK 天（60 分）
+    - KEYPERSON_FREQUENCY_DAYS_LEFT 与 KEYPERSON_FREQUENCY_DAYS_RIGHT 为 0 分边界（含两端及之外）
+    - 峰值左右两段为倒置抛物线
     """
     days = float(outing_days or 0)
     peak = float(KEYPERSON_FREQUENCY_DAYS_PEAK)
@@ -1220,6 +1220,18 @@ def build_keyperson_filtered_dataframe(
     df_valid = df_valid.sort_values("time")
     matched_records = int(len(df_valid))
 
+    # 时段内出行天数：每个车牌在所选卡口且落入日内时段的不同日期数
+    if not df_valid.empty:
+        time_window_outing_days_map = (
+            df_valid.assign(_date=df_valid["time"].dt.date)
+            .drop_duplicates(subset=["plate", "_date"])
+            .groupby("plate")
+            .size()
+            .to_dict()
+        )
+    else:
+        time_window_outing_days_map = {}
+
     detail_rows = []
     filtered_vehicle_count = 0
 
@@ -1238,9 +1250,10 @@ def build_keyperson_filtered_dataframe(
             time_window_count / total_occurrence_count if total_occurrence_count > 0 else 0.0
         )
         outing_days = int(outing_days_map.get(plate, 0))
+        time_window_outing_days = int(time_window_outing_days_map.get(plate, 0))
 
-        # 综合评分：频率分基于出行天数曲线，时段分基于时段内占比
-        frequency_score = get_keyperson_frequency_score_by_days(outing_days)
+        # 综合评分：频率分基于"时段内出行天数"曲线，时段分基于时段内占比
+        frequency_score = get_keyperson_frequency_score_by_days(time_window_outing_days)
         time_score = get_keyperson_time_score_by_ratio(time_window_count, total_occurrence_count)
         total_score = round(frequency_score + time_score, 1)
         level, level_label = get_keyperson_level(total_score)
@@ -1276,6 +1289,7 @@ def build_keyperson_filtered_dataframe(
                     "occurrence_count": occurrence_count,
                     "total_occurrence_count": total_occurrence_count,
                     "outing_days": outing_days,
+                    "time_window_outing_days": time_window_outing_days,
                     "time_window_count": time_window_count,
                     "time_window_ratio": time_window_ratio,
                     "frequency_score": frequency_score,
@@ -1316,6 +1330,7 @@ def build_keyperson_filtered_dataframe(
         filtered_df = pd.DataFrame(columns=[
             "plate", "plate_type_summary", "person_name", "person_id_card", "person_phone",
             "occurrence_count", "total_occurrence_count", "outing_days",
+            "time_window_outing_days",
             "time_window_count", "time_window_ratio",
             "frequency_score", "time_score", "total_score", "level", "level_label",
             "event_date", "daily_occurrence_count",
@@ -1488,6 +1503,7 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
         time_window_count = int(row.get("time_window_count", 0) or 0)
         time_window_ratio = float(row.get("time_window_ratio", 0.0) or 0.0)
         outing_days = int(row.get("outing_days", 0) or 0)
+        time_window_outing_days = int(row.get("time_window_outing_days", 0) or 0)
         total_occurrence_count = int(row.get("total_occurrence_count", 0) or 0)
 
         event_date = normalize_text_value(row.get("event_date", ""))
@@ -1503,6 +1519,7 @@ def build_keyperson_display_results(filtered_df, selected_export_columns):
             "occurrence_count": int(row.get("occurrence_count", 0) or 0),
             "total_occurrence_count": total_occurrence_count,
             "outing_days": outing_days,
+            "time_window_outing_days": time_window_outing_days,
             "time_window_count": time_window_count,
             "time_window_ratio": time_window_ratio,
             "frequency_score": float(row.get("frequency_score", 0.0) or 0.0),
@@ -1755,8 +1772,7 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
     export_columns = sanitize_export_columns(selected_export_columns)
     vehicle_summary_columns = [
         "车牌号", "姓名", "身份证", "手机",
-        "出现次数",
-        "出行天数", "总出现次数", "时段内出现次数", "时段占比",
+        "出行天数", "时段内出行天数", "总出现次数", "时段内出现次数", "时段占比",
         "频率评分", "时间评分", "综合评分",
         "风险等级",
     ]
@@ -1768,8 +1784,7 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
     ]
     summary_columns = [
         "车牌号", "姓名", "身份证", "手机",
-        "出现次数",
-        "出行天数", "总出现次数", "时段内出现次数", "时段占比",
+        "出行天数", "时段内出行天数", "总出现次数", "时段内出现次数", "时段占比",
         "频率评分", "时间评分", "综合评分",
         "通行日期",
         "当天出现次数",
@@ -1803,14 +1818,15 @@ def build_keyperson_export_dataframe(filtered_df, selected_export_columns):
         time_window_count = int(row.get("time_window_count", 0) or 0)
         time_window_ratio = float(row.get("time_window_ratio", 0.0) or 0.0)
         outing_days = int(row.get("outing_days", 0) or 0)
+        time_window_outing_days = int(row.get("time_window_outing_days", 0) or 0)
         total_occurrence_count = int(row.get("total_occurrence_count", 0) or 0)
         export_row = {
             "车牌号": normalize_text_value(row.get("plate", "")),
             "姓名": normalize_text_value(row.get("person_name", "")),
             "身份证": normalize_text_value(row.get("person_id_card", "")),
             "手机": normalize_text_value(row.get("person_phone", "")),
-            "出现次数": int(row.get("occurrence_count", 0) or 0),
             "出行天数": outing_days,
+            "时段内出行天数": time_window_outing_days,
             "总出现次数": total_occurrence_count,
             "时段内出现次数": time_window_count,
             "时段占比": f"{time_window_ratio:.0%}",

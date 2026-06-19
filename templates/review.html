@@ -120,14 +120,69 @@
 
     <div data-mode-block="pair">
       <section class="section-card">
-        <div class="section-title">筛选时间段（配对模式）</div>
-        <div class="section-hint">默认回填当前通行数据最小时间到最大时间，只统计该时间段内记录。</div>
-        <div class="helper-inline">
-          <span>从</span>
-          <input type="datetime-local" name="start_time" value="{{ start_time_value }}">
-          <span>到</span>
-          <input type="datetime-local" name="end_time" value="{{ end_time_value }}">
+        <div class="section-title">日内时段（配对模式）</div>
+        <div class="section-hint">按 24 小时制设置时段，仅比较每天的时分；支持跨天，例如 20:00 到 04:00。只统计处于该时段内的过车数据。</div>
+        <div class="clock-grid">
+          <div class="clock-card">
+            <div class="clock-card-title">开始时间</div>
+            <div class="clock-pad">
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">小时</div>
+                <div class="clock-pad-grid clock-pad-grid-hours">
+                  {% for hour in range(24) %}
+                    {% set hour_text = "%02d"|format(hour) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="pair_start_hour" value="{{ hour_text }}" {% if pair_start_hour_value == hour_text %}checked{% endif %}>
+                      <span>{{ hour_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">分钟</div>
+                <div class="clock-pad-grid clock-pad-grid-minutes">
+                  {% for minute in range(60) %}
+                    {% set minute_text = "%02d"|format(minute) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="pair_start_minute" value="{{ minute_text }}" {% if pair_start_minute_value == minute_text %}checked{% endif %}>
+                      <span>{{ minute_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="clock-card">
+            <div class="clock-card-title">结束时间</div>
+            <div class="clock-pad">
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">小时</div>
+                <div class="clock-pad-grid clock-pad-grid-hours">
+                  {% for hour in range(24) %}
+                    {% set hour_text = "%02d"|format(hour) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="pair_end_hour" value="{{ hour_text }}" {% if pair_end_hour_value == hour_text %}checked{% endif %}>
+                      <span>{{ hour_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+              <div class="clock-pad-section">
+                <div class="clock-pad-label">分钟</div>
+                <div class="clock-pad-grid clock-pad-grid-minutes">
+                  {% for minute in range(60) %}
+                    {% set minute_text = "%02d"|format(minute) %}
+                    <label class="clock-pad-cell">
+                      <input type="radio" name="pair_end_minute" value="{{ minute_text }}" {% if pair_end_minute_value == minute_text %}checked{% endif %}>
+                      <span>{{ minute_text }}</span>
+                    </label>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
+        <small>示例：20:00-04:00 表示跨天时段。</small>
       </section>
 
       <div class="section-grid">
@@ -633,7 +688,7 @@
         <a href="{{ url_for('upload_form') }}" class="btn btn-ghost" style="margin-left: 8px;">返回首页</a>
       </div>
       <div class="toolbar-note" data-mode-note="pair">
-        配对模式提交时会校验第一卡口和第二卡口必须各选一个且不能相同。
+        配对模式按日内时段筛选过车数据（支持跨天，如 20:00-04:00），时间范围默认取当前数据的最小到最大时间，提交时会校验第一卡口和第二卡口必须各选一个且不能相同。
       </div>
       <div class="toolbar-note" data-mode-note="timed_cross">
         绝对时间卡口模式会校验：前置/后置卡口均已选择，且同一车辆满足“前置时刻前经过 + 后置时刻后离开”。

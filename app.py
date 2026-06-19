@@ -5,13 +5,24 @@ import sqlite3
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from io import BytesIO
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
-from flask import Flask, render_template, request, redirect, url_for, send_file, flash
+from flask import (
+    Flask,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    send_from_directory,
+    url_for,
+)
 
 ALLOWED_EXTENSIONS = {"xls", "xlsx"}
 FILTER_MODE_PAIR = "pair"
@@ -21,6 +32,8 @@ FILTER_MODE_TIMED_CROSS = "timed_cross"
 DEFAULT_FREQUENT_OCCURRENCE = 2
 DEFAULT_FREQUENT_START_CLOCK = "00:00"
 DEFAULT_FREQUENT_END_CLOCK = "23:59"
+DEFAULT_PAIR_START_CLOCK = "00:00"
+DEFAULT_PAIR_END_CLOCK = "23:59"
 DEFAULT_KEYPERSON_MIN_OCCURRENCE = 1
 # 频率评分以"时段内出行天数"为输入，按抛物线在 LEFT~RIGHT 天之间取值，PEAK 天处为满分；PEAK 默认 25 可在重点人模式页面配置
 DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK = 25
@@ -96,11 +109,35 @@ def _db_path(data_id):
     return os.path.join(app.config["UPLOAD_FOLDER"], f"{data_id}.db")
 
 
+def _sqlite_insert_chunksize(conn, column_count, default=1000):
+    """根据 SQLite 参数上限计算批量插入大小。"""
+    variable_limit = 999
+    limit_category = getattr(sqlite3, "SQLITE_LIMIT_VARIABLE_NUMBER", None)
+    if limit_category is not None and hasattr(conn, "getlimit"):
+        try:
+            variable_limit = conn.getlimit(limit_category)
+        except sqlite3.Error:
+            pass
+
+    column_count = max(1, column_count)
+    return max(1, min(default, variable_limit // column_count))
+
+
 def _save_df(df, data_id, table):
     """将 DataFrame 写入 SQLite 表。"""
     conn = sqlite3.connect(_db_path(data_id))
     try:
-        df.to_sql(table, conn, if_exists="replace", index=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        chunksize = _sqlite_insert_chunksize(conn, len(df.columns))
+        df.to_sql(
+            table,
+            conn,
+            if_exists="replace",
+            index=False,
+            method="multi",
+            chunksize=chunksize,
+        )
     finally:
         conn.close()
 
@@ -357,6 +394,12 @@ def normalize_text_value(value):
     if text.lower() in {"nan", "none", "nat"}:
         return ""
     return text
+
+
+def normalize_text_series(series):
+    """Vectorized text normalization for large Excel columns."""
+    normalized = series.fillna("").astype(str).str.replace("\xa0", " ", regex=False).str.strip()
+    return normalized.mask(normalized.str.lower().isin({"nan", "none", "nat"}), "")
 
 
 def normalize_choice_list(values, allowed_values=None):
@@ -917,11 +960,23 @@ def build_pair_filtered_dataframe(
     active_first_locations,
     active_second_locations,
     target_minutes,
+    start_clock=None,
+    end_clock=None,
 ):
-    """第一/第二卡口配对模式计算。"""
+    """第一/第二卡口配对模式计算，支持日内时段过滤。"""
     valid_locations = active_first_locations.union(active_second_locations)
     df_valid = df[df["location"].isin(valid_locations)].copy()
     df_valid = df_valid[(df_valid["time"] >= start_time) & (df_valid["time"] <= end_time)]
+    # 日内时段过滤
+    if start_clock is not None and end_clock is not None:
+        start_minutes = clock_to_minutes(start_clock)
+        end_minutes = clock_to_minutes(end_clock)
+        clock_minutes = df_valid["time"].dt.hour * 60 + df_valid["time"].dt.minute
+        if start_minutes <= end_minutes:
+            time_mask = (clock_minutes >= start_minutes) & (clock_minutes <= end_minutes)
+        else:
+            time_mask = (clock_minutes >= start_minutes) | (clock_minutes <= end_minutes)
+        df_valid = df_valid[time_mask]
     df_valid = df_valid.sort_values("time")
 
     results = []
@@ -2378,82 +2433,87 @@ def parse_excel(path):
         "plate_type", "plate_kind", "plate_category",
     ]
 
-    # 第一步：只读表头，识别需要的列
     try:
-        header_df = pd.read_excel(path, nrows=0)
+        excel_file = pd.ExcelFile(path)
     except Exception as exc:
         raise ValueError(f"无法读取Excel文件: {exc}")
 
-    if header_df.empty and len(header_df.columns) == 0:
-        raise EmptyExcelError("Excel 文件为空。")
-
-    normalized_headers = normalize_excel_headers(header_df.columns)
-    source_columns = list(normalized_headers)
-
-    plate_col = _find_matching_from_headers(header_df.columns, normalized_headers, plate_candidates)
-    time_col = _find_matching_from_headers(header_df.columns, normalized_headers, time_candidates)
-    location_col = _find_matching_from_headers(header_df.columns, normalized_headers, location_candidates)
-    plate_type_col = _find_matching_from_headers(header_df.columns, normalized_headers, plate_type_candidates)
-
-    missing = []
-    if plate_col is None:
-        missing.append("车牌号列")
-    if time_col is None:
-        missing.append("抓拍时间列")
-    if location_col is None:
-        missing.append("抓拍地点列")
-
-    if missing:
-        cols_str = ", ".join(str(c) for c in normalized_headers)
-        raise ValueError(f"无法自动识别列: {', '.join(missing)}。当前表头为: {cols_str}")
-
-    # 第二步：读所有列，指定 dtype=str 避免逐列类型推断（主要性能优化点）
     try:
-        df = pd.read_excel(path, dtype=str)
-    except Exception as exc:
-        raise ValueError(f"无法读取Excel文件: {exc}")
+        # 第一步：只读表头，识别需要的列；复用 ExcelFile，避免后续重复解析文件结构。
+        try:
+            header_df = pd.read_excel(excel_file, nrows=0)
+        except Exception as exc:
+            raise ValueError(f"无法读取Excel文件: {exc}")
 
-    if df.empty:
-        raise EmptyExcelError("Excel 文件为空。")
+        if header_df.empty and len(header_df.columns) == 0:
+            raise EmptyExcelError("Excel 文件为空。")
 
-    # 用标准化列名替换原始列名
-    col_rename = {orig: norm for orig, norm in zip(header_df.columns, normalized_headers) if orig in df.columns}
-    df.rename(columns=col_rename, inplace=True)
-    plate_col = col_rename.get(plate_col, plate_col)
-    time_col = col_rename.get(time_col, time_col)
-    location_col = col_rename.get(location_col, location_col)
-    if plate_type_col is not None:
-        plate_type_col = col_rename.get(plate_type_col, plate_type_col)
+        normalized_headers = normalize_excel_headers(header_df.columns)
+        source_columns = list(normalized_headers)
 
-    parsed_df = pd.DataFrame(
-        {
-            "plate": df[plate_col],
+        plate_col = _find_matching_from_headers(header_df.columns, normalized_headers, plate_candidates)
+        time_col = _find_matching_from_headers(header_df.columns, normalized_headers, time_candidates)
+        location_col = _find_matching_from_headers(header_df.columns, normalized_headers, location_candidates)
+        plate_type_col = _find_matching_from_headers(header_df.columns, normalized_headers, plate_type_candidates)
+
+        missing = []
+        if plate_col is None:
+            missing.append("车牌号列")
+        if time_col is None:
+            missing.append("抓拍时间列")
+        if location_col is None:
+            missing.append("抓拍地点列")
+
+        if missing:
+            cols_str = ", ".join(str(c) for c in normalized_headers)
+            raise ValueError(f"无法自动识别列: {', '.join(missing)}。当前表头为: {cols_str}")
+
+        # 第二步：读所有列，指定 dtype=str 避免逐列类型推断。
+        try:
+            df = pd.read_excel(excel_file, dtype=str)
+        except Exception as exc:
+            raise ValueError(f"无法读取Excel文件: {exc}")
+
+        if df.empty:
+            raise EmptyExcelError("Excel 文件为空。")
+
+        # 用标准化列名替换原始列名
+        col_rename = {orig: norm for orig, norm in zip(header_df.columns, normalized_headers) if orig in df.columns}
+        df.rename(columns=col_rename, inplace=True)
+        plate_col = col_rename.get(plate_col, plate_col)
+        time_col = col_rename.get(time_col, time_col)
+        location_col = col_rename.get(location_col, location_col)
+        if plate_type_col is not None:
+            plate_type_col = col_rename.get(plate_type_col, plate_type_col)
+
+        parsed_df = pd.DataFrame({
+            "plate": normalize_text_series(df[plate_col]),
             "time": pd.to_datetime(df[time_col], errors="coerce"),
-            "location": df[location_col],
-        }
-    )
+            "location": normalize_text_series(df[location_col]),
+        })
 
-    if plate_type_col is not None:
-        parsed_df["plate_type"] = df[plate_type_col]
-    else:
-        parsed_df["plate_type"] = ""
+        if plate_type_col is not None:
+            parsed_df["plate_type"] = normalize_text_series(df[plate_type_col])
+        else:
+            parsed_df["plate_type"] = ""
 
-    # 保留原始列副本，用于频繁模式导出
-    for column in source_columns:
-        if column in df.columns:
-            parsed_df[source_column_key(column)] = df[column]
+        # 保留原始列副本，用于频繁模式导出。一次性 concat，避免逐列插入造成碎片化。
+        source_df = df[[column for column in source_columns if column in df.columns]].copy()
+        source_df.rename(
+            columns={column: source_column_key(column) for column in source_df.columns},
+            inplace=True,
+        )
+        parsed_df = pd.concat([parsed_df, source_df], axis=1, copy=False)
 
-    parsed_df["plate"] = parsed_df["plate"].map(normalize_text_value)
-    parsed_df["location"] = parsed_df["location"].map(normalize_text_value)
-    parsed_df["plate_type"] = parsed_df["plate_type"].map(normalize_text_value)
+        parsed_df = parsed_df.dropna(subset=["time"])
+        parsed_df = parsed_df[parsed_df["plate"] != ""]
+        parsed_df = parsed_df[parsed_df["location"] != ""]
+        parsed_df = parsed_df[parsed_df["plate"] != "无牌车"]
+        parsed_df = parsed_df[parsed_df["plate"] != "未识别"]
 
-    parsed_df = parsed_df.dropna(subset=["time"])
-    parsed_df = parsed_df[parsed_df["plate"] != ""]
-    parsed_df = parsed_df[parsed_df["location"] != ""]
-    parsed_df = parsed_df[parsed_df["plate"] != "无牌车"]
-    parsed_df = parsed_df[parsed_df["plate"] != "未识别"]
-
-    return parsed_df, source_columns
+        return parsed_df, source_columns
+    finally:
+        excel_file.close()
 
 
 def _find_matching_from_headers(original_columns, normalized_headers, candidates):
@@ -2508,6 +2568,1156 @@ def _cleanup_sessions():
     _prune_invalid_session_history()
 
 
+class ApiError(ValueError):
+    """API-facing validation error with an HTTP status code."""
+
+    def __init__(self, message, status_code=400):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def api_success(**payload):
+    response = {"ok": True}
+    response.update(payload)
+    return jsonify(response)
+
+
+def api_error(message, status_code=400):
+    return jsonify({"ok": False, "message": message}), status_code
+
+
+def _request_values(name):
+    """Read repeated form values, with a small JSON fallback for API clients."""
+    values = request.form.getlist(name)
+    if values:
+        return values
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        raw_value = payload.get(name, [])
+        if isinstance(raw_value, list):
+            return raw_value
+        if raw_value:
+            return [raw_value]
+    return []
+
+
+def _build_home_payload():
+    checkpoint_library = load_checkpoint_library()
+    keyperson_library = load_keyperson_library()
+    session_history = _prune_invalid_session_history()
+    latest_session_id = ""
+    if session_history:
+        latest_session_id = normalize_text_value(session_history[0].get("data_id", ""))
+    return {
+        "checkpoint_library": checkpoint_library,
+        "matched_home_checkpoints": checkpoint_library[:12],
+        "keyperson_count": len(keyperson_library),
+        "session_history": session_history,
+        "latest_session_id": latest_session_id,
+    }
+
+
+def _create_traffic_session(files):
+    files = [f for f in files if f and f.filename]
+    if not files:
+        raise ApiError("请选择要上传的文件。")
+
+    valid_files = []
+    skipped_non_excel = []
+    for file in files:
+        if allowed_file(file.filename):
+            valid_files.append(file)
+        else:
+            skipped_non_excel.append(file.filename)
+
+    if not valid_files:
+        raise ApiError("未发现可解析的 Excel 文件（仅支持 .xls / .xlsx）。")
+
+    dfs = []
+    source_columns = []
+    source_column_set = set()
+    temp_filepaths = []
+    skipped_empty = []
+
+    for file in valid_files:
+        filepath = save_uploaded_excel(file)
+        temp_filepaths.append((filepath, file.filename))
+
+    max_workers = min(4, max(1, len(temp_filepaths)))
+    parse_results = [None] * len(temp_filepaths)
+    parse_error = None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(parse_excel, filepath): (idx, filepath, original_name)
+            for idx, (filepath, original_name) in enumerate(temp_filepaths)
+        }
+        for future in as_completed(futures):
+            idx, filepath, original_name = futures[future]
+            if parse_error is not None:
+                continue
+            try:
+                parse_results[idx] = future.result()
+            except EmptyExcelError:
+                skipped_empty.append(original_name)
+            except ValueError as exc:
+                parse_error = ApiError(f"文件 {original_name} 解析失败: {exc}")
+            except Exception as exc:
+                parse_error = ApiError(f"文件 {original_name} 解析失败: {exc}")
+
+    if parse_error is not None:
+        for fp, _ in temp_filepaths:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+        raise parse_error
+
+    for result in parse_results:
+        if result is None:
+            continue
+        df_part, file_columns = result
+        dfs.append(df_part)
+        for column in file_columns:
+            if column not in source_column_set:
+                source_column_set.add(column)
+                source_columns.append(column)
+
+    if not dfs:
+        for fp, _ in temp_filepaths:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+        raise ApiError("未解析到任何有效数据。")
+
+    df = pd.concat(dfs, ignore_index=True, copy=False)
+    locations = sorted(df["location"].dropna().unique().tolist())
+    plate_types = sorted(set(normalize_text_series(df.get("plate_type", pd.Series(dtype=object))).tolist()) - {""})
+    data_id = str(uuid.uuid4())
+    default_max_minutes = 30.0
+    default_start_time = format_datetime_local(df["time"].min())
+    default_end_time = format_datetime_local(df["time"].max())
+    default_export_columns = pick_default_export_columns(source_columns)
+
+    _save_df(df, data_id, "raw_data")
+    record_count = len(df)
+    filenames_list = [f.filename for f in valid_files]
+    del df
+    del dfs
+
+    for fp, _ in temp_filepaths:
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
+
+    DATA_STORE[data_id] = {
+        "db_path": _db_path(data_id),
+        "locations": locations,
+        "plate_types": plate_types,
+        "source_columns": source_columns,
+        "last_imported_checkpoint_column": "",
+        "default_max_minutes": default_max_minutes,
+        "default_start_time": default_start_time,
+        "default_end_time": default_end_time,
+        "filtered_mode": None,
+        "summary": None,
+        "selected_export_columns": [],
+        "config": {
+            "filter_mode": FILTER_MODE_PAIR,
+            "min_occurrence": DEFAULT_FREQUENT_OCCURRENCE,
+            "frequent_start_clock": DEFAULT_FREQUENT_START_CLOCK,
+            "frequent_end_clock": DEFAULT_FREQUENT_END_CLOCK,
+            "pair_start_clock": DEFAULT_PAIR_START_CLOCK,
+            "pair_end_clock": DEFAULT_PAIR_END_CLOCK,
+            "export_columns": default_export_columns,
+            "start_time": default_start_time,
+            "end_time": default_end_time,
+            "target_minutes": default_max_minutes,
+            "timed_entry_checkpoint": "",
+            "timed_exit_checkpoint": "",
+            "timed_entry_before_time": default_start_time,
+            "timed_exit_after_time": default_end_time,
+        },
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "last_access": time.time(),
+    }
+
+    _save_metadata(data_id)
+    _add_to_session_history(data_id, filenames_list, record_count)
+
+    notices = []
+    if skipped_empty:
+        notices.append(f"已跳过空文件 {len(skipped_empty)} 个：{', '.join(skipped_empty)}")
+    if skipped_non_excel:
+        preview = "、".join(skipped_non_excel[:3])
+        remain = len(skipped_non_excel) - 3
+        if remain > 0:
+            preview = f"{preview} 等"
+        notices.append(
+            f"已忽略 {len(skipped_non_excel)} 个非 Excel 文件（{preview}），其余 Excel 已成功导入。"
+        )
+
+    return {
+        "data_id": data_id,
+        "filenames": filenames_list,
+        "record_count": record_count,
+        "location_count": len(locations),
+        "plate_type_count": len(plate_types),
+        "notices": notices,
+    }
+
+
+def _build_review_payload(data_id):
+    data = _get_or_restore_session(data_id)
+    if not data:
+        raise ApiError("数据已过期或不存在，请重新上传文件。", 404)
+
+    config = data.get("config", {})
+    filter_mode = normalize_text_value(config.get("filter_mode", FILTER_MODE_PAIR)).lower()
+    if filter_mode not in {
+        FILTER_MODE_PAIR,
+        FILTER_MODE_TIMED_CROSS,
+        FILTER_MODE_FREQUENT,
+        FILTER_MODE_KEYPERSON,
+    }:
+        filter_mode = FILTER_MODE_PAIR
+
+    start_time_value = normalize_text_value(config.get("start_time")) or data.get(
+        "default_start_time", ""
+    )
+    end_time_value = normalize_text_value(config.get("end_time")) or data.get(
+        "default_end_time", ""
+    )
+    frequent_start_clock_value = normalize_text_value(
+        config.get("frequent_start_clock", DEFAULT_FREQUENT_START_CLOCK)
+    ) or DEFAULT_FREQUENT_START_CLOCK
+    frequent_end_clock_value = normalize_text_value(
+        config.get("frequent_end_clock", DEFAULT_FREQUENT_END_CLOCK)
+    ) or DEFAULT_FREQUENT_END_CLOCK
+    frequent_start_hour_value, frequent_start_minute_value = split_clock_value(
+        frequent_start_clock_value, default_hour="00", default_minute="00"
+    )
+    frequent_end_hour_value, frequent_end_minute_value = split_clock_value(
+        frequent_end_clock_value, default_hour="23", default_minute="59"
+    )
+    pair_start_clock_value = normalize_text_value(
+        config.get("pair_start_clock", DEFAULT_PAIR_START_CLOCK)
+    ) or DEFAULT_PAIR_START_CLOCK
+    pair_end_clock_value = normalize_text_value(
+        config.get("pair_end_clock", DEFAULT_PAIR_END_CLOCK)
+    ) or DEFAULT_PAIR_END_CLOCK
+    pair_start_hour_value, pair_start_minute_value = split_clock_value(
+        pair_start_clock_value, default_hour="00", default_minute="00"
+    )
+    pair_end_hour_value, pair_end_minute_value = split_clock_value(
+        pair_end_clock_value, default_hour="23", default_minute="59"
+    )
+
+    checkpoint_library = load_checkpoint_library()
+    selected_first_checkpoint = config.get("first_checkpoint", "")
+    if not selected_first_checkpoint:
+        legacy_first = config.get("entry_checkpoint", "")
+        if isinstance(legacy_first, str):
+            selected_first_checkpoint = legacy_first
+    if not selected_first_checkpoint:
+        legacy_entry = config.get("entry_checkpoints", [])
+        if isinstance(legacy_entry, list) and legacy_entry:
+            selected_first_checkpoint = legacy_entry[0]
+        elif isinstance(legacy_entry, str):
+            selected_first_checkpoint = legacy_entry
+
+    selected_second_checkpoint = config.get("second_checkpoint", "")
+    if not selected_second_checkpoint:
+        legacy_second = config.get("exit_checkpoint", "")
+        if isinstance(legacy_second, str):
+            selected_second_checkpoint = legacy_second
+    if not selected_second_checkpoint:
+        legacy_exit = config.get("exit_checkpoints", [])
+        if isinstance(legacy_exit, list) and legacy_exit:
+            selected_second_checkpoint = legacy_exit[0]
+        elif isinstance(legacy_exit, str):
+            selected_second_checkpoint = legacy_exit
+
+    selected_timed_entry_checkpoint = normalize_text_value(
+        config.get("timed_entry_checkpoint")
+    )
+    if not selected_timed_entry_checkpoint:
+        selected_timed_entry_checkpoint = selected_first_checkpoint
+    selected_timed_exit_checkpoint = normalize_text_value(
+        config.get("timed_exit_checkpoint")
+    )
+    if not selected_timed_exit_checkpoint:
+        selected_timed_exit_checkpoint = selected_second_checkpoint
+    timed_entry_before_time_value = normalize_text_value(
+        config.get("timed_entry_before_time")
+    ) or start_time_value
+    timed_exit_after_time_value = normalize_text_value(
+        config.get("timed_exit_after_time")
+    ) or end_time_value
+
+    current_locations = data.get("locations", [])
+    matched_checkpoints = sorted(set(current_locations).intersection(checkpoint_library))
+    matched_checkpoint_set = set(matched_checkpoints)
+    prioritized_checkpoint_library = matched_checkpoints + [
+        checkpoint for checkpoint in checkpoint_library if checkpoint not in matched_checkpoint_set
+    ]
+
+    source_columns = data.get("source_columns", [])
+    selected_import_column = data.get("last_imported_checkpoint_column", "")
+    if not selected_import_column and source_columns:
+        selected_import_column = source_columns[0]
+    selected_frequent_checkpoints = normalize_choice_list(
+        config.get("frequent_checkpoints", []), checkpoint_library
+    )
+    selected_export_columns = normalize_choice_list(
+        config.get("export_columns", []), source_columns
+    )
+    if not selected_export_columns:
+        selected_export_columns = pick_default_export_columns(source_columns)
+
+    min_occurrence_value = config.get("min_occurrence", DEFAULT_FREQUENT_OCCURRENCE)
+    try:
+        min_occurrence_value = int(min_occurrence_value)
+    except (TypeError, ValueError):
+        min_occurrence_value = DEFAULT_FREQUENT_OCCURRENCE
+    if min_occurrence_value <= 0:
+        min_occurrence_value = DEFAULT_FREQUENT_OCCURRENCE
+
+    target_minutes_value = config.get("target_minutes", data.get("default_max_minutes", 30))
+    try:
+        target_minutes_value = float(target_minutes_value)
+    except (TypeError, ValueError):
+        target_minutes_value = float(data.get("default_max_minutes", 30))
+    if target_minutes_value <= 0:
+        target_minutes_value = float(data.get("default_max_minutes", 30))
+
+    keyperson_library = load_keyperson_library()
+    keyperson_start_clock_value = normalize_text_value(
+        config.get("keyperson_start_clock", DEFAULT_FREQUENT_START_CLOCK)
+    ) or DEFAULT_FREQUENT_START_CLOCK
+    keyperson_end_clock_value = normalize_text_value(
+        config.get("keyperson_end_clock", DEFAULT_FREQUENT_END_CLOCK)
+    ) or DEFAULT_FREQUENT_END_CLOCK
+    keyperson_start_hour_value, keyperson_start_minute_value = split_clock_value(
+        keyperson_start_clock_value, default_hour="00", default_minute="00"
+    )
+    keyperson_end_hour_value, keyperson_end_minute_value = split_clock_value(
+        keyperson_end_clock_value, default_hour="23", default_minute="59"
+    )
+    selected_keyperson_checkpoints = normalize_choice_list(
+        config.get("keyperson_checkpoints", []), checkpoint_library
+    )
+    selected_keypersons = normalize_choice_list(
+        config.get("keyperson_selected", []),
+        [p["plate"] for p in keyperson_library],
+    )
+
+    keyperson_min_occurrence = config.get(
+        "keyperson_min_occurrence", DEFAULT_KEYPERSON_MIN_OCCURRENCE
+    )
+    try:
+        keyperson_min_occurrence = int(keyperson_min_occurrence)
+    except (TypeError, ValueError):
+        keyperson_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+    if keyperson_min_occurrence <= 0:
+        keyperson_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+
+    keyperson_frequency_days_peak = config.get(
+        "keyperson_frequency_days_peak", DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK,
+    )
+    try:
+        keyperson_frequency_days_peak = int(keyperson_frequency_days_peak)
+    except (TypeError, ValueError):
+        keyperson_frequency_days_peak = DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+    if not (
+        KEYPERSON_FREQUENCY_DAYS_LEFT
+        < keyperson_frequency_days_peak
+        < KEYPERSON_FREQUENCY_DAYS_RIGHT
+    ):
+        keyperson_frequency_days_peak = DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+
+    _touch_session(data_id)
+    return {
+        "data_id": data_id,
+        "locations": current_locations,
+        "plate_types": data.get("plate_types", []),
+        "default_max_minutes": data.get("default_max_minutes", 30),
+        "filter_mode": filter_mode,
+        "config": config,
+        "start_time_value": start_time_value,
+        "end_time_value": end_time_value,
+        "checkpoint_library": checkpoint_library,
+        "prioritized_checkpoint_library": prioritized_checkpoint_library,
+        "selected_first_checkpoint": selected_first_checkpoint,
+        "selected_second_checkpoint": selected_second_checkpoint,
+        "selected_timed_entry_checkpoint": selected_timed_entry_checkpoint,
+        "selected_timed_exit_checkpoint": selected_timed_exit_checkpoint,
+        "timed_entry_before_time_value": timed_entry_before_time_value,
+        "timed_exit_after_time_value": timed_exit_after_time_value,
+        "selected_frequent_checkpoints": selected_frequent_checkpoints,
+        "selected_export_columns": selected_export_columns,
+        "min_occurrence_value": min_occurrence_value,
+        "target_minutes_value": target_minutes_value,
+        "frequent_start_clock_value": frequent_start_clock_value,
+        "frequent_end_clock_value": frequent_end_clock_value,
+        "frequent_start_hour_value": frequent_start_hour_value,
+        "frequent_start_minute_value": frequent_start_minute_value,
+        "frequent_end_hour_value": frequent_end_hour_value,
+        "frequent_end_minute_value": frequent_end_minute_value,
+        "pair_start_clock_value": pair_start_clock_value,
+        "pair_end_clock_value": pair_end_clock_value,
+        "pair_start_hour_value": pair_start_hour_value,
+        "pair_start_minute_value": pair_start_minute_value,
+        "pair_end_hour_value": pair_end_hour_value,
+        "pair_end_minute_value": pair_end_minute_value,
+        "matched_checkpoints": matched_checkpoints,
+        "source_columns": source_columns,
+        "selected_import_column": selected_import_column,
+        "keyperson_library": keyperson_library,
+        "selected_keyperson_checkpoints": selected_keyperson_checkpoints,
+        "selected_keypersons": selected_keypersons,
+        "keyperson_min_occurrence": keyperson_min_occurrence,
+        "keyperson_frequency_days_peak": keyperson_frequency_days_peak,
+        "keyperson_frequency_days_left": KEYPERSON_FREQUENCY_DAYS_LEFT,
+        "keyperson_frequency_days_right": KEYPERSON_FREQUENCY_DAYS_RIGHT,
+        "keyperson_start_clock_value": keyperson_start_clock_value,
+        "keyperson_end_clock_value": keyperson_end_clock_value,
+        "keyperson_start_hour_value": keyperson_start_hour_value,
+        "keyperson_start_minute_value": keyperson_start_minute_value,
+        "keyperson_end_hour_value": keyperson_end_hour_value,
+        "keyperson_end_minute_value": keyperson_end_minute_value,
+    }
+
+
+def _build_results_payload(data_id, page=1):
+    data = _get_or_restore_session(data_id)
+    if not data:
+        raise ApiError("数据已过期或不存在，请重新上传文件。", 404)
+
+    filter_mode = data.get("filtered_mode")
+    if not filter_mode:
+        raise ApiError("请先完成筛选。", 409)
+
+    summary = data.get("summary", {})
+    selected_export_columns = data.get("selected_export_columns", [])
+    config = data.get("config", {})
+
+    filtered_df = _load_df(data_id, "filtered_data")
+    if filter_mode in {FILTER_MODE_PAIR, FILTER_MODE_TIMED_CROSS}:
+        filtered_df = _restore_pair_dtypes(filtered_df)
+        display_results = build_pair_display_results(filtered_df)
+    elif filter_mode == FILTER_MODE_KEYPERSON:
+        filtered_df = _restore_keyperson_dtypes(filtered_df)
+        start_clock_str = normalize_text_value(
+            config.get("keyperson_start_clock", DEFAULT_FREQUENT_START_CLOCK)
+        ) or DEFAULT_FREQUENT_START_CLOCK
+        end_clock_str = normalize_text_value(
+            config.get("keyperson_end_clock", DEFAULT_FREQUENT_END_CLOCK)
+        ) or DEFAULT_FREQUENT_END_CLOCK
+        try:
+            start_clock, end_clock = parse_clock_window(start_clock_str, end_clock_str)
+            filtered_df = filter_dataframe_by_clock_window(
+                filtered_df, "event_time", start_clock, end_clock
+            )
+        except ValueError:
+            pass
+
+        threshold = config.get("keyperson_min_occurrence", DEFAULT_KEYPERSON_MIN_OCCURRENCE)
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+        if threshold <= 0:
+            threshold = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+
+        summary = build_keyperson_results_summary(
+            filtered_df,
+            matched_records=len(filtered_df),
+            threshold=threshold,
+        )
+        summary["total_persons"] = (
+            int(filtered_df["plate"].nunique()) if "plate" in filtered_df.columns else 0
+        )
+
+        export_cols = selected_export_columns or config.get("export_columns", [])
+        display_results = build_keyperson_display_results(
+            filtered_df, selected_export_columns=export_cols,
+        )
+    else:
+        filtered_df = _restore_frequent_dtypes(filtered_df)
+        threshold = config.get("min_occurrence", DEFAULT_FREQUENT_OCCURRENCE)
+        export_cols = selected_export_columns or config.get("export_columns", [])
+        display_results = build_frequent_display_results(
+            filtered_df, threshold=threshold, selected_export_columns=export_cols,
+        )
+    del filtered_df
+
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 1
+    page_results, total_pages, has_prev, has_next = paginate_results(
+        display_results, page, filter_mode
+    )
+
+    _touch_session(data_id)
+    return {
+        "data_id": data_id,
+        "filter_mode": filter_mode,
+        "results": page_results,
+        "summary": summary,
+        "selected_export_columns": selected_export_columns,
+        "page": page,
+        "total_pages": total_pages,
+        "has_prev": has_prev,
+        "has_next": has_next,
+        "total_results": len(display_results),
+        "download_url": url_for("download", data_id=data_id),
+        "keyperson_frequency_days_peak": int(
+            config.get("keyperson_frequency_days_peak", DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK)
+            or DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+        ),
+        "keyperson_frequency_days_left": KEYPERSON_FREQUENCY_DAYS_LEFT,
+        "keyperson_frequency_days_right": KEYPERSON_FREQUENCY_DAYS_RIGHT,
+    }
+
+
+def _execute_filter_for_api(data_id, form):
+    data = _get_or_restore_session(data_id)
+    if not data:
+        raise ApiError("数据已过期或不存在，请重新上传文件。", 404)
+
+    df = _restore_raw_dtypes(_load_df(data_id, "raw_data"))
+    config = data.get("config", {}).copy()
+    source_columns = data.get("source_columns", [])
+    checkpoint_library = set(load_checkpoint_library())
+    current_data_locations = set(data.get("locations", []))
+    plate_types = data.get("plate_types", [])
+
+    exclude_plate_types = normalize_choice_list(form.getlist("exclude_plate_types"), plate_types)
+    if exclude_plate_types and "plate_type" in df.columns:
+        df = df[~df["plate_type"].isin(exclude_plate_types)]
+
+    filter_mode = normalize_text_value(form.get("filter_mode", FILTER_MODE_PAIR)).lower()
+    if filter_mode not in {
+        FILTER_MODE_PAIR,
+        FILTER_MODE_TIMED_CROSS,
+        FILTER_MODE_FREQUENT,
+        FILTER_MODE_KEYPERSON,
+    }:
+        filter_mode = FILTER_MODE_PAIR
+
+    config.update({"filter_mode": filter_mode, "exclude_plate_types": exclude_plate_types})
+
+    if filter_mode == FILTER_MODE_PAIR:
+        start_time_str = normalize_text_value(data.get("default_start_time"))
+        end_time_str = normalize_text_value(data.get("default_end_time"))
+        try:
+            start_time, end_time = parse_time_window(start_time_str, end_time_str)
+        except ValueError as exc:
+            raise ApiError(str(exc))
+
+        pair_start_clock_str = normalize_text_value(form.get("pair_start_clock"))
+        pair_end_clock_str = normalize_text_value(form.get("pair_end_clock"))
+        if not pair_start_clock_str:
+            pair_start_clock_str = compose_clock_value(
+                form.get("pair_start_hour"), form.get("pair_start_minute")
+            )
+        if not pair_end_clock_str:
+            pair_end_clock_str = compose_clock_value(
+                form.get("pair_end_hour"), form.get("pair_end_minute")
+            )
+        try:
+            pair_start_clock, pair_end_clock = parse_clock_window(
+                pair_start_clock_str, pair_end_clock_str
+            )
+        except ValueError as exc:
+            raise ApiError(str(exc))
+
+        first_checkpoint = normalize_text_value(form.get("first_checkpoint"))
+        second_checkpoint = normalize_text_value(form.get("second_checkpoint"))
+        if not first_checkpoint:
+            first_checkpoint = normalize_text_value(form.get("entry_checkpoint"))
+        if not second_checkpoint:
+            second_checkpoint = normalize_text_value(form.get("exit_checkpoint"))
+
+        if not first_checkpoint or not second_checkpoint:
+            raise ApiError("请分别选择第一卡口和第二卡口。")
+        if first_checkpoint not in checkpoint_library or second_checkpoint not in checkpoint_library:
+            raise ApiError("所选卡口不在本地卡口库中，请重新选择。")
+        if first_checkpoint == second_checkpoint:
+            raise ApiError("第一卡口和第二卡口不能相同，请重新选择。")
+
+        active_first_locations = {first_checkpoint}.intersection(current_data_locations)
+        active_second_locations = {second_checkpoint}.intersection(current_data_locations)
+        if not active_first_locations or not active_second_locations:
+            raise ApiError("所选第一或第二卡口未出现在当前通行数据中，请重新选择。")
+
+        target_minutes = form.get("target_minutes", type=float)
+        if target_minutes is None or target_minutes <= 0:
+            raise ApiError("请填写正确的目标过车间隔（分钟）。")
+
+        filtered_df = build_pair_filtered_dataframe(
+            df=df,
+            start_time=start_time,
+            end_time=end_time,
+            active_first_locations=active_first_locations,
+            active_second_locations=active_second_locations,
+            target_minutes=target_minutes,
+            start_clock=pair_start_clock,
+            end_clock=pair_end_clock,
+        )
+        summary = build_results_summary(filtered_df)
+        _save_df(filtered_df, data_id, "filtered_data")
+        del df, filtered_df
+
+        config.update({
+            "first_checkpoint": first_checkpoint,
+            "second_checkpoint": second_checkpoint,
+            "entry_checkpoint": first_checkpoint,
+            "exit_checkpoint": second_checkpoint,
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "target_minutes": target_minutes,
+            "pair_start_clock": pair_start_clock.strftime("%H:%M"),
+            "pair_end_clock": pair_end_clock.strftime("%H:%M"),
+        })
+
+        DATA_STORE[data_id]["config"] = config
+        DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_PAIR
+        DATA_STORE[data_id]["summary"] = summary
+        DATA_STORE[data_id]["selected_export_columns"] = []
+        DATA_STORE[data_id]["last_access"] = time.time()
+        _save_metadata(data_id)
+        _update_history_filter_mode(data_id, FILTER_MODE_PAIR)
+        return FILTER_MODE_PAIR
+
+    if filter_mode == FILTER_MODE_TIMED_CROSS:
+        timed_entry_before_time_str = normalize_text_value(form.get("timed_entry_before_time"))
+        timed_exit_after_time_str = normalize_text_value(form.get("timed_exit_after_time"))
+        try:
+            timed_entry_before_time = parse_datetime_local_value(
+                timed_entry_before_time_str, "“前置经过时间”"
+            )
+            timed_exit_after_time = parse_datetime_local_value(
+                timed_exit_after_time_str, "“后置离开时间”"
+            )
+        except ValueError as exc:
+            raise ApiError(str(exc))
+
+        if timed_entry_before_time > timed_exit_after_time:
+            raise ApiError("请确保“前置经过时间”早于或等于“后置离开时间”。")
+
+        if timed_entry_before_time.second == 0 and timed_entry_before_time.microsecond == 0:
+            timed_entry_before_time = (
+                timed_entry_before_time + timedelta(minutes=1) - timedelta(microseconds=1)
+            )
+
+        timed_entry_checkpoint = normalize_text_value(form.get("timed_entry_checkpoint"))
+        timed_exit_checkpoint = normalize_text_value(form.get("timed_exit_checkpoint"))
+        if not timed_entry_checkpoint or not timed_exit_checkpoint:
+            raise ApiError("请分别选择“前置经过卡口”和“后置离开卡口”。")
+        if (
+            timed_entry_checkpoint not in checkpoint_library
+            or timed_exit_checkpoint not in checkpoint_library
+        ):
+            raise ApiError("所选卡口不在本地卡口库中，请重新选择。")
+        if timed_entry_checkpoint == timed_exit_checkpoint:
+            raise ApiError("前置经过卡口和后置离开卡口不能相同，请重新选择。")
+
+        active_entry_locations = {timed_entry_checkpoint}.intersection(current_data_locations)
+        active_exit_locations = {timed_exit_checkpoint}.intersection(current_data_locations)
+        if not active_entry_locations or not active_exit_locations:
+            raise ApiError("所选卡口未出现在当前通行数据中，请重新选择。")
+
+        filtered_df = build_timed_cross_filtered_dataframe(
+            df=df,
+            active_entry_locations=active_entry_locations,
+            active_exit_locations=active_exit_locations,
+            entry_before_time=timed_entry_before_time,
+            exit_after_time=timed_exit_after_time,
+        )
+        summary = build_results_summary(filtered_df)
+        _save_df(filtered_df, data_id, "filtered_data")
+        del df, filtered_df
+
+        config.update({
+            "timed_entry_checkpoint": timed_entry_checkpoint,
+            "timed_exit_checkpoint": timed_exit_checkpoint,
+            "timed_entry_before_time": timed_entry_before_time_str,
+            "timed_exit_after_time": timed_exit_after_time_str,
+            "entry_checkpoint": timed_entry_checkpoint,
+            "exit_checkpoint": timed_exit_checkpoint,
+        })
+
+        DATA_STORE[data_id]["config"] = config
+        DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_TIMED_CROSS
+        DATA_STORE[data_id]["summary"] = summary
+        DATA_STORE[data_id]["selected_export_columns"] = []
+        DATA_STORE[data_id]["last_access"] = time.time()
+        _save_metadata(data_id)
+        _update_history_filter_mode(data_id, FILTER_MODE_TIMED_CROSS)
+        return FILTER_MODE_TIMED_CROSS
+
+    if filter_mode == FILTER_MODE_KEYPERSON:
+        kp_selected_checkpoints = normalize_choice_list(
+            form.getlist("keyperson_checkpoints"), checkpoint_library
+        )
+        if not kp_selected_checkpoints:
+            raise ApiError("请至少选择一个卡口用于重点人筛选。")
+
+        kp_active_checkpoints = sorted(
+            set(kp_selected_checkpoints).intersection(current_data_locations)
+        )
+        if not kp_active_checkpoints:
+            raise ApiError("所选卡口未出现在当前通行数据中，请重新选择。")
+
+        kp_selected_plates = form.getlist("keyperson_selected")
+        keyperson_library = load_keyperson_library()
+        keyperson_lookup = {}
+        for person in keyperson_library:
+            plate = normalize_text_value(person.get("plate"))
+            if plate and plate in kp_selected_plates:
+                keyperson_lookup[plate] = person
+        if not keyperson_lookup:
+            raise ApiError("请至少选择一个重点人。")
+
+        kp_min_occurrence = form.get("keyperson_min_occurrence", type=int)
+        if kp_min_occurrence is None:
+            kp_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+        if kp_min_occurrence <= 0:
+            kp_min_occurrence = DEFAULT_KEYPERSON_MIN_OCCURRENCE
+
+        kp_frequency_days_peak = form.get("keyperson_frequency_days_peak", type=int)
+        if kp_frequency_days_peak is None:
+            kp_frequency_days_peak = DEFAULT_KEYPERSON_FREQUENCY_DAYS_PEAK
+        if not (
+            KEYPERSON_FREQUENCY_DAYS_LEFT
+            < kp_frequency_days_peak
+            < KEYPERSON_FREQUENCY_DAYS_RIGHT
+        ):
+            raise ApiError(
+                f"频率分峰值天数必须位于 {KEYPERSON_FREQUENCY_DAYS_LEFT + 1} 到 "
+                f"{KEYPERSON_FREQUENCY_DAYS_RIGHT - 1} 天之间。"
+            )
+
+        kp_start_clock_str = normalize_text_value(form.get("keyperson_start_clock"))
+        kp_end_clock_str = normalize_text_value(form.get("keyperson_end_clock"))
+        if not kp_start_clock_str:
+            kp_start_clock_str = compose_clock_value(
+                form.get("keyperson_start_hour"), form.get("keyperson_start_minute")
+            )
+        if not kp_end_clock_str:
+            kp_end_clock_str = compose_clock_value(
+                form.get("keyperson_end_hour"), form.get("keyperson_end_minute")
+            )
+        try:
+            kp_start_clock, kp_end_clock = parse_clock_window(
+                kp_start_clock_str, kp_end_clock_str
+            )
+        except ValueError as exc:
+            raise ApiError(str(exc))
+
+        selected_export_columns = normalize_choice_list(
+            form.getlist("export_columns"), source_columns
+        )
+        if not selected_export_columns:
+            selected_export_columns = pick_default_export_columns(source_columns)
+
+        filtered_df, matched_records, filtered_vehicle_count = build_keyperson_filtered_dataframe(
+            df=df,
+            start_clock=kp_start_clock,
+            end_clock=kp_end_clock,
+            active_checkpoints=kp_active_checkpoints,
+            keyperson_lookup=keyperson_lookup,
+            min_occurrence=kp_min_occurrence,
+            frequency_days_peak=kp_frequency_days_peak,
+        )
+        summary = build_keyperson_results_summary(
+            filtered_df, matched_records=matched_records, threshold=kp_min_occurrence,
+        )
+        summary["total_persons"] = filtered_vehicle_count
+        _save_df(filtered_df, data_id, "filtered_data")
+        del df, filtered_df
+
+        config.update({
+            "keyperson_checkpoints": kp_selected_checkpoints,
+            "keyperson_selected": list(keyperson_lookup.keys()),
+            "keyperson_min_occurrence": kp_min_occurrence,
+            "keyperson_frequency_days_peak": kp_frequency_days_peak,
+            "keyperson_start_clock": kp_start_clock.strftime("%H:%M"),
+            "keyperson_end_clock": kp_end_clock.strftime("%H:%M"),
+            "export_columns": selected_export_columns,
+        })
+
+        DATA_STORE[data_id]["config"] = config
+        DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_KEYPERSON
+        DATA_STORE[data_id]["summary"] = summary
+        DATA_STORE[data_id]["selected_export_columns"] = selected_export_columns
+        DATA_STORE[data_id]["last_access"] = time.time()
+        _save_metadata(data_id)
+        _update_history_filter_mode(data_id, FILTER_MODE_KEYPERSON)
+        return FILTER_MODE_KEYPERSON
+
+    selected_checkpoints = normalize_choice_list(
+        form.getlist("frequent_checkpoints"), checkpoint_library
+    )
+    if not selected_checkpoints:
+        raise ApiError("请至少选择一个卡口用于频繁出现筛选。")
+
+    active_checkpoints = sorted(set(selected_checkpoints).intersection(current_data_locations))
+    if not active_checkpoints:
+        raise ApiError("所选卡口未出现在当前通行数据中，请重新选择。")
+
+    min_occurrence = form.get("min_occurrence", type=int)
+    if min_occurrence is None:
+        min_occurrence = DEFAULT_FREQUENT_OCCURRENCE
+    if min_occurrence <= 0:
+        raise ApiError("出现次数必须大于 0。")
+
+    frequent_start_clock_str = normalize_text_value(form.get("frequent_start_clock"))
+    frequent_end_clock_str = normalize_text_value(form.get("frequent_end_clock"))
+    if not frequent_start_clock_str:
+        frequent_start_clock_str = compose_clock_value(
+            form.get("frequent_start_hour"), form.get("frequent_start_minute")
+        )
+    if not frequent_end_clock_str:
+        frequent_end_clock_str = compose_clock_value(
+            form.get("frequent_end_hour"), form.get("frequent_end_minute")
+        )
+    try:
+        frequent_start_clock, frequent_end_clock = parse_clock_window(
+            frequent_start_clock_str, frequent_end_clock_str
+        )
+    except ValueError as exc:
+        raise ApiError(str(exc))
+
+    selected_export_columns = normalize_choice_list(
+        form.getlist("export_columns"), source_columns
+    )
+    if not selected_export_columns:
+        selected_export_columns = pick_default_export_columns(source_columns)
+
+    filtered_df, matched_records, filtered_vehicle_count = build_frequent_filtered_dataframe(
+        df=df,
+        start_clock=frequent_start_clock,
+        end_clock=frequent_end_clock,
+        active_checkpoints=active_checkpoints,
+        min_occurrence=min_occurrence,
+    )
+    summary = build_frequent_results_summary(
+        filtered_df, matched_records=matched_records, threshold=min_occurrence
+    )
+    summary["total_vehicles"] = filtered_vehicle_count
+    _save_df(filtered_df, data_id, "filtered_data")
+    del df, filtered_df
+
+    config.update({
+        "frequent_checkpoints": selected_checkpoints,
+        "min_occurrence": min_occurrence,
+        "frequent_start_clock": frequent_start_clock.strftime("%H:%M"),
+        "frequent_end_clock": frequent_end_clock.strftime("%H:%M"),
+        "export_columns": selected_export_columns,
+    })
+
+    DATA_STORE[data_id]["config"] = config
+    DATA_STORE[data_id]["filtered_mode"] = FILTER_MODE_FREQUENT
+    DATA_STORE[data_id]["summary"] = summary
+    DATA_STORE[data_id]["selected_export_columns"] = selected_export_columns
+    DATA_STORE[data_id]["last_access"] = time.time()
+    _save_metadata(data_id)
+    _update_history_filter_mode(data_id, FILTER_MODE_FREQUENT)
+    return FILTER_MODE_FREQUENT
+
+
+def _build_checkpoint_library_payload(data_id=""):
+    data_id = normalize_text_value(data_id)
+    data = None
+    message = ""
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            message = "数据会话已过期，已打开通用卡口库管理。"
+            data_id = ""
+
+    checkpoint_library = load_checkpoint_library()
+    source_columns = []
+    selected_import_column = ""
+    matched_checkpoints = []
+    prioritized_checkpoint_library = checkpoint_library
+
+    if data:
+        source_columns = data.get("source_columns", [])
+        selected_import_column = data.get("last_imported_checkpoint_column", "")
+        if not selected_import_column and source_columns:
+            selected_import_column = source_columns[0]
+        current_locations = data.get("locations", [])
+        matched_checkpoints = sorted(set(current_locations).intersection(checkpoint_library))
+        matched_set = set(matched_checkpoints)
+        prioritized_checkpoint_library = matched_checkpoints + [
+            checkpoint for checkpoint in checkpoint_library if checkpoint not in matched_set
+        ]
+        _touch_session(data_id)
+
+    return {
+        "data_id": data_id,
+        "has_active_session": bool(data_id),
+        "checkpoint_library": checkpoint_library,
+        "prioritized_checkpoint_library": prioritized_checkpoint_library,
+        "matched_checkpoints": matched_checkpoints,
+        "source_columns": source_columns,
+        "selected_import_column": selected_import_column,
+        "message": message,
+    }
+
+
+def _build_keyperson_library_payload(data_id=""):
+    data_id = normalize_text_value(data_id)
+    data = None
+    message = ""
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            message = "数据会话已过期，已打开通用重点人库管理。"
+            data_id = ""
+
+    keyperson_library = load_keyperson_library()
+    selected_keypersons = []
+    if data:
+        selected_keypersons = normalize_choice_list(
+            data.get("config", {}).get("keyperson_selected", []),
+            [p["plate"] for p in keyperson_library],
+        )
+        _touch_session(data_id)
+
+    return {
+        "data_id": data_id,
+        "has_active_session": bool(data_id),
+        "keyperson_library": keyperson_library,
+        "selected_keypersons": selected_keypersons,
+        "message": message,
+    }
+
+
+@app.route("/app", methods=["GET"])
+@app.route("/app/", methods=["GET"])
+def frontend_app():
+    """Serve the decoupled frontend shell."""
+    return send_from_directory(os.path.join(RESOURCE_BASE_DIR, "static", "frontend"), "index.html")
+
+
+@app.route("/app/<path:filename>", methods=["GET"])
+def frontend_assets(filename):
+    return send_from_directory(os.path.join(RESOURCE_BASE_DIR, "static", "frontend"), filename)
+
+
+@app.route("/api/home", methods=["GET"])
+def api_home():
+    return api_success(**_build_home_payload())
+
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    if "files" not in request.files:
+        return api_error("未找到上传文件。")
+    try:
+        payload = _create_traffic_session(request.files.getlist("files"))
+    except ApiError as exc:
+        return api_error(exc.message, exc.status_code)
+    return api_success(**payload, review_url=f"/api/review/{payload['data_id']}")
+
+
+@app.route("/api/review/<data_id>", methods=["GET"])
+def api_review(data_id):
+    try:
+        payload = _build_review_payload(data_id)
+    except ApiError as exc:
+        return api_error(exc.message, exc.status_code)
+    return api_success(**payload)
+
+
+@app.route("/api/filter/<data_id>", methods=["POST"])
+def api_filter_results(data_id):
+    try:
+        filter_mode = _execute_filter_for_api(data_id, request.form)
+        payload = _build_results_payload(data_id, page=1)
+    except ApiError as exc:
+        return api_error(exc.message, exc.status_code)
+    return api_success(filter_mode=filter_mode, results_payload=payload)
+
+
+@app.route("/api/results/<data_id>", methods=["GET"])
+def api_results(data_id):
+    try:
+        payload = _build_results_payload(data_id, page=request.args.get("page", 1))
+    except ApiError as exc:
+        return api_error(exc.message, exc.status_code)
+    return api_success(**payload)
+
+
+@app.route("/api/libraries/checkpoints", methods=["GET"])
+def api_checkpoint_library():
+    return api_success(**_build_checkpoint_library_payload(request.args.get("data_id", "")))
+
+
+@app.route("/api/checkpoints/import/<data_id>", methods=["POST"])
+def api_import_checkpoints(data_id):
+    data = _get_or_restore_session(data_id)
+    if not data:
+        return api_error("数据已过期或不存在，请重新上传文件。", 404)
+
+    column_name = normalize_text_value(request.form.get("checkpoint_source_column"))
+    if not column_name:
+        return api_error("请选择要导入的卡口列。")
+
+    source_columns = data.get("source_columns", [])
+    try:
+        df = _restore_raw_dtypes(_load_df(data_id, "raw_data"))
+        imported_checkpoints, _ = import_checkpoints_from_dataframe(
+            df, column_name, source_columns
+        )
+    except ValueError as exc:
+        return api_error(str(exc))
+    except Exception:
+        return api_error("未找到已解析数据，请重新上传后再试。", 404)
+
+    existing_checkpoints = load_checkpoint_library()
+    merged_checkpoints = save_checkpoint_library(existing_checkpoints + imported_checkpoints)
+    new_count = len(set(merged_checkpoints) - set(existing_checkpoints))
+
+    data["last_imported_checkpoint_column"] = column_name
+    _touch_session(data_id)
+    _save_metadata(data_id)
+
+    return api_success(
+        message=(
+            f"已从'{column_name}'导入卡口，识别 {len(imported_checkpoints)} 个卡口，"
+            f"新增 {new_count} 个，本地卡口库现有 {len(merged_checkpoints)} 个。"
+        ),
+        library_payload=_build_checkpoint_library_payload(data_id),
+    )
+
+
+@app.route("/api/checkpoints/delete", methods=["POST"])
+@app.route("/api/checkpoints/delete/<data_id>", methods=["POST"])
+def api_delete_checkpoints(data_id=None):
+    data = None
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            return api_error("数据已过期或不存在，请重新上传文件。", 404)
+
+    checkpoint_library = load_checkpoint_library()
+    selected_checkpoints = normalize_choice_list(
+        _request_values("delete_checkpoints"), checkpoint_library,
+    )
+    if not selected_checkpoints:
+        return api_error("请先选择要删除的卡口。")
+
+    removed_set = set(selected_checkpoints)
+    remaining_checkpoints = [
+        checkpoint for checkpoint in checkpoint_library if checkpoint not in removed_set
+    ]
+    updated_library = save_checkpoint_library(remaining_checkpoints)
+
+    if data:
+        config = data.get("config", {})
+        data["config"] = prune_removed_checkpoints_from_config(config, selected_checkpoints)
+        _touch_session(data_id)
+        _save_metadata(data_id)
+
+    return api_success(
+        message=f"已删除 {len(selected_checkpoints)} 个卡口，本地卡口库剩余 {len(updated_library)} 个。",
+        library_payload=_build_checkpoint_library_payload(data_id or ""),
+    )
+
+
+@app.route("/api/libraries/keypersons", methods=["GET"])
+def api_keyperson_library():
+    return api_success(**_build_keyperson_library_payload(request.args.get("data_id", "")))
+
+
+@app.route("/api/keypersons/import", methods=["POST"])
+@app.route("/api/keypersons/import/<data_id>", methods=["POST"])
+def api_import_keypersons(data_id=None):
+    data = None
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            return api_error("数据已过期或不存在，请重新上传文件。", 404)
+
+    file = request.files.get("keyperson_file")
+    if not file or not file.filename:
+        return api_error("请选择要上传的重点人 Excel 文件。")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        return api_error("仅支持 .xls 和 .xlsx 格式。")
+
+    filepath = save_uploaded_excel(file)
+    try:
+        new_persons = parse_keyperson_excel(filepath)
+    except ValueError as exc:
+        return api_error(str(exc))
+    except Exception:
+        return api_error("重点人文件解析失败，请检查格式。")
+    finally:
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+
+    if not new_persons:
+        return api_error("未从文件中识别到有效的重点人数据。")
+
+    existing = load_keyperson_library()
+    existing_plates = {p["plate"] for p in existing}
+    added = [p for p in new_persons if p["plate"] not in existing_plates]
+    save_keyperson_library(existing + new_persons)
+
+    if data:
+        _touch_session(data_id)
+
+    return api_success(
+        message=f"成功导入 {len(added)} 名新重点人（共 {len(existing) + len(added)} 名，重复已合并）。",
+        library_payload=_build_keyperson_library_payload(data_id or ""),
+    )
+
+
+@app.route("/api/keypersons/delete", methods=["POST"])
+@app.route("/api/keypersons/delete/<data_id>", methods=["POST"])
+def api_delete_keypersons(data_id=None):
+    data = None
+    if data_id:
+        data = _get_or_restore_session(data_id)
+        if not data:
+            return api_error("数据已过期或不存在，请重新上传文件。", 404)
+
+    selected_plates = set(normalize_choice_list(_request_values("delete_keypersons")))
+    if not selected_plates:
+        return api_error("未选择要删除的重点人。")
+
+    existing = load_keyperson_library()
+    updated = [p for p in existing if p["plate"] not in selected_plates]
+    save_keyperson_library(updated)
+
+    if data:
+        config = data.get("config", {})
+        kp_selected = config.get("keyperson_selected", [])
+        config["keyperson_selected"] = [p for p in kp_selected if p not in selected_plates]
+        data["config"] = config
+        _touch_session(data_id)
+        _save_metadata(data_id)
+
+    return api_success(
+        message=f"已删除 {len(selected_plates)} 名重点人，本地重点人库剩余 {len(updated)} 名。",
+        library_payload=_build_keyperson_library_payload(data_id or ""),
+    )
+
+
 @app.route("/", methods=["GET"])
 def upload_form():
     """上传页面。"""
@@ -2535,139 +3745,16 @@ def upload():
         flash("未找到上传文件。")
         return redirect(url_for("upload_form"))
 
-    files = request.files.getlist("files")
-    files = [f for f in files if f and f.filename]
-    if not files:
-        flash("请选择要上传的文件。")
+    try:
+        payload = _create_traffic_session(request.files.getlist("files"))
+    except ApiError as exc:
+        flash(exc.message)
         return redirect(url_for("upload_form"))
 
-    valid_files = []
-    skipped_non_excel = []
-    for f in files:
-        if allowed_file(f.filename):
-            valid_files.append(f)
-        else:
-            skipped_non_excel.append(f.filename)
+    for notice in payload.get("notices", []):
+        flash(notice)
 
-    if not valid_files:
-        flash("未发现可解析的 Excel 文件（仅支持 .xls / .xlsx）。")
-        return redirect(url_for("upload_form"))
-
-    dfs = []
-    source_columns = []
-    source_column_set = set()
-    temp_filepaths = []
-    skipped_empty = []
-
-    for file in valid_files:
-        filepath = save_uploaded_excel(file)
-        temp_filepaths.append(filepath)
-
-        try:
-            df_part, file_columns = parse_excel(filepath)
-        except EmptyExcelError:
-            skipped_empty.append(file.filename)
-            try:
-                os.remove(filepath)
-            except OSError:
-                pass
-            temp_filepaths.pop()
-            continue
-        except ValueError as exc:
-            for fp in temp_filepaths:
-                try:
-                    os.remove(fp)
-                except OSError:
-                    pass
-            flash(f"文件 {file.filename} 解析失败: {exc}")
-            return redirect(url_for("upload_form"))
-
-        dfs.append(df_part)
-        for column in file_columns:
-            if column not in source_column_set:
-                source_column_set.add(column)
-                source_columns.append(column)
-
-    if skipped_empty:
-        flash(f"已跳过空文件 {len(skipped_empty)} 个：{', '.join(skipped_empty)}")
-
-    if not dfs:
-        for fp in temp_filepaths:
-            try:
-                os.remove(fp)
-            except OSError:
-                pass
-        flash("未解析到任何有效数据。")
-        return redirect(url_for("upload_form"))
-
-    df = pd.concat(dfs, ignore_index=True)
-    locations = sorted(df["location"].dropna().unique().tolist())
-    plate_type_values = [normalize_text_value(v) for v in df.get("plate_type", pd.Series(dtype=object)).tolist()]
-    plate_types = sorted({value for value in plate_type_values if value})
-
-    data_id = str(uuid.uuid4())
-    default_max_minutes = 30.0
-    default_start_time = format_datetime_local(df["time"].min())
-    default_end_time = format_datetime_local(df["time"].max())
-    default_export_columns = pick_default_export_columns(source_columns)
-
-    # DataFrame 持久化到 SQLite，不在内存中保留
-    _save_df(df, data_id, "raw_data")
-    record_count = len(df)
-    filenames_list = [f.filename for f in valid_files]
-    del df
-    del dfs
-
-    # 删除临时 Excel 文件
-    for fp in temp_filepaths:
-        try:
-            os.remove(fp)
-        except OSError:
-            pass
-
-    DATA_STORE[data_id] = {
-        "db_path": _db_path(data_id),
-        "locations": locations,
-        "plate_types": plate_types,
-        "source_columns": source_columns,
-        "last_imported_checkpoint_column": "",
-        "default_max_minutes": default_max_minutes,
-        "default_start_time": default_start_time,
-        "default_end_time": default_end_time,
-        "filtered_mode": None,
-        "summary": None,
-        "selected_export_columns": [],
-        "config": {
-            "filter_mode": FILTER_MODE_PAIR,
-            "min_occurrence": DEFAULT_FREQUENT_OCCURRENCE,
-            "frequent_start_clock": DEFAULT_FREQUENT_START_CLOCK,
-            "frequent_end_clock": DEFAULT_FREQUENT_END_CLOCK,
-            "export_columns": default_export_columns,
-            "start_time": default_start_time,
-            "end_time": default_end_time,
-            "target_minutes": default_max_minutes,
-            "timed_entry_checkpoint": "",
-            "timed_exit_checkpoint": "",
-            "timed_entry_before_time": default_start_time,
-            "timed_exit_after_time": default_end_time,
-        },
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "last_access": time.time(),
-    }
-
-    _save_metadata(data_id)
-    _add_to_session_history(data_id, filenames_list, record_count)
-
-    if skipped_non_excel:
-        preview = "、".join(skipped_non_excel[:3])
-        remain = len(skipped_non_excel) - 3
-        if remain > 0:
-            preview = f"{preview} 等"
-        flash(
-            f"已忽略 {len(skipped_non_excel)} 个非 Excel 文件（{preview}），其余 Excel 已成功导入。"
-        )
-
-    return redirect(url_for("review", data_id=data_id))
+    return redirect(url_for("review", data_id=payload["data_id"]))
 
 
 @app.route("/library/checkpoints", methods=["GET"])
@@ -2999,6 +4086,18 @@ def review(data_id):
     frequent_end_hour_value, frequent_end_minute_value = split_clock_value(
         frequent_end_clock_value, default_hour="23", default_minute="59"
     )
+    pair_start_clock_value = normalize_text_value(
+        config.get("pair_start_clock", DEFAULT_PAIR_START_CLOCK)
+    ) or DEFAULT_PAIR_START_CLOCK
+    pair_end_clock_value = normalize_text_value(
+        config.get("pair_end_clock", DEFAULT_PAIR_END_CLOCK)
+    ) or DEFAULT_PAIR_END_CLOCK
+    pair_start_hour_value, pair_start_minute_value = split_clock_value(
+        pair_start_clock_value, default_hour="00", default_minute="00"
+    )
+    pair_end_hour_value, pair_end_minute_value = split_clock_value(
+        pair_end_clock_value, default_hour="23", default_minute="59"
+    )
     checkpoint_library = load_checkpoint_library()
     selected_first_checkpoint = config.get("first_checkpoint", "")
     if not selected_first_checkpoint:
@@ -3146,6 +4245,12 @@ def review(data_id):
         frequent_start_minute_value=frequent_start_minute_value,
         frequent_end_hour_value=frequent_end_hour_value,
         frequent_end_minute_value=frequent_end_minute_value,
+        pair_start_clock_value=pair_start_clock_value,
+        pair_end_clock_value=pair_end_clock_value,
+        pair_start_hour_value=pair_start_hour_value,
+        pair_start_minute_value=pair_start_minute_value,
+        pair_end_hour_value=pair_end_hour_value,
+        pair_end_minute_value=pair_end_minute_value,
         matched_checkpoints=matched_checkpoints,
         source_columns=source_columns,
         selected_import_column=selected_import_column,
@@ -3202,10 +4307,28 @@ def filter_results(data_id):
     )
 
     if filter_mode == FILTER_MODE_PAIR:
-        start_time_str = normalize_text_value(request.form.get("start_time"))
-        end_time_str = normalize_text_value(request.form.get("end_time"))
+        start_time_str = normalize_text_value(data.get("default_start_time"))
+        end_time_str = normalize_text_value(data.get("default_end_time"))
         try:
             start_time, end_time = parse_time_window(start_time_str, end_time_str)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("review", data_id=data_id))
+
+        pair_start_clock_str = normalize_text_value(request.form.get("pair_start_clock"))
+        pair_end_clock_str = normalize_text_value(request.form.get("pair_end_clock"))
+        if not pair_start_clock_str:
+            pair_start_clock_str = compose_clock_value(
+                request.form.get("pair_start_hour"), request.form.get("pair_start_minute")
+            )
+        if not pair_end_clock_str:
+            pair_end_clock_str = compose_clock_value(
+                request.form.get("pair_end_hour"), request.form.get("pair_end_minute")
+            )
+        try:
+            pair_start_clock, pair_end_clock = parse_clock_window(
+                pair_start_clock_str, pair_end_clock_str
+            )
         except ValueError as exc:
             flash(str(exc))
             return redirect(url_for("review", data_id=data_id))
@@ -3248,6 +4371,8 @@ def filter_results(data_id):
             active_first_locations=active_first_locations,
             active_second_locations=active_second_locations,
             target_minutes=target_minutes,
+            start_clock=pair_start_clock,
+            end_clock=pair_end_clock,
         )
         summary = build_results_summary(filtered_df)
         _save_df(filtered_df, data_id, "filtered_data")
@@ -3262,6 +4387,8 @@ def filter_results(data_id):
                 "start_time": start_time_str,
                 "end_time": end_time_str,
                 "target_minutes": target_minutes,
+                "pair_start_clock": pair_start_clock.strftime("%H:%M"),
+                "pair_end_clock": pair_end_clock.strftime("%H:%M"),
             }
         )
 

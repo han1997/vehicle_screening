@@ -1,0 +1,43 @@
+{
+  "id": "web",
+  "name": "web",
+  "title": "保留桌面版并清理旧 Web 代码",
+  "description": "Adopt and publish the desktop app; remove retired Flask and migration-only source while protecting local data.",
+  "status": "completed",
+  "dev_type": "fullstack",
+  "scope": "desktop-only repository",
+  "package": null,
+  "priority": "P2",
+  "creator": "han1997",
+  "assignee": "han1997",
+  "createdAt": "2026-09-10",
+  "completedAt": "2026-09-10",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": "795896314e8d718446e220ec9d5eddaabf681196",
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "desktop/",
+    "static/frontend/",
+    "tests/",
+    "README.md",
+    "CHANGELOG.md",
+    ".gitignore",
+    ".trellis/spec/",
+    "app.py",
+    "templates/",
+    "build_exe.ps1",
+    "build_win7_dual_installers.ps1"
+  ],
+  "notes": "Completed and pushed desktop-only transition to origin/main; remote verified at 0990474b1762643a7024a8ba694519bd8e4647e1. 15 tests, 157 API assertions, lint/format/source checks and both x64/ia32 unpacked builds passed. Data and local-only files were preserved. See research/verification.md and work-commits.json.",
+  "meta": {
+    "work_commits": [
+      "795896314e8d718446e220ec9d5eddaabf681196",
+      "0990474b1762643a7024a8ba694519bd8e4647e1"
+    ]
+  }
+}

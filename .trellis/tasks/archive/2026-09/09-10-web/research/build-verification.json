@@ -1,0 +1,16 @@
+[
+  {
+    "architecture": "x64",
+    "machine": 34404,
+    "packagedFiles": 2923,
+    "frontendFiles": 38,
+    "iconBytes": 3431
+  },
+  {
+    "architecture": "ia32",
+    "machine": 332,
+    "packagedFiles": 2923,
+    "frontendFiles": 38,
+    "iconBytes": 3431
+  }
+]

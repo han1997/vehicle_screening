@@ -1,0 +1,23 @@
+{
+    "local_untracked_backup":  ".trellis/.backup-desktop-cleanup-20260910-123934",
+    "removed":  [
+                    "app.py",
+                    "build_exe.ps1",
+                    "build_win7_dual_installers.ps1",
+                    "CLAUDE.md",
+                    "content.md",
+                    "DESIGN.md",
+                    "PRODUCT.md",
+                    "templates/base.html",
+                    "templates/checkpoint_library.html",
+                    "templates/keyperson_library.html",
+                    "templates/results.html",
+                    "templates/review.html",
+                    "templates/upload.html",
+                    "desktop/scripts/debug-pair.js",
+                    "desktop/scripts/parity-test.js",
+                    "desktop/scripts/make-parity-data.js",
+                    "desktop/scripts/smoke-test.js"
+                ],
+    "note":  "Only approved source files were removed. User data, notes, environments and releases were untouched."
+}

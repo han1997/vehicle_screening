@@ -1,0 +1,10 @@
+{
+  "desktop/server/core/filters.js": "84f7476778574a3797034ccc3065a5ef10de6b7e119e3f4811f421f7840444c6",
+  "desktop/server/core/libraries.js": "438d112f7b972fad8bbf0dbfdcfa40ebe13881a21f09f315e8875ca03dfe1ad5",
+  "desktop/server/core/paginate.js": "0193e46c58d45cf7e1f72a4790369d8a34c96716fc1e29095c4618067235c549",
+  "desktop/server/core/scoring.js": "a39f1ef1c1de81cecc3edafa48d56f33b8cd02a3ee5bd6363c68f305be68383e",
+  "desktop/server/core/session.js": "2cd1cbd09b768ed2b3b91e4f4eea350987d1ccc0a8c21bfebf2c17a65cfbd0e0",
+  "desktop/server/excel/reader.js": "c848643b6a8c05567d922e23fc935ec07f674d217c000c0a896f3022f89e2625",
+  "desktop/server/excel/writer.js": "3ba584ad578cf86ba3cc3d57ab179fda8f54472726d82831fb7922b7697f6cf2",
+  "desktop/server/services/results.js": "552d9b65306ff434d99ca04180f3dbada0a2c19f63b0b3cf5551d9d2d2954c01"
+}

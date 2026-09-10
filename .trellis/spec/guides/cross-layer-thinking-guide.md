@@ -11,7 +11,7 @@ Form changes have another input path:
 `DOM control -> draft -> payload -> service validation -> applied_config -> restore/display/export`
 
 Use [Screening Contracts](../backend/screening-contracts.md) for signatures and invariants. The
-legacy Flask path is separate: decide explicitly whether a task requires parity with `app.py`.
+repository is desktop-only; Python test orchestration does not imply a Python product runtime.
 
 ## Questions to Answer
 
@@ -27,6 +27,8 @@ legacy Flask path is separate: decide explicitly whether a task requires parity 
 - For night stays, do window membership, exact duration, early-morning entry and review categories
   remain consistent through restart and workbook export?
 - Will dev and packaged frontend paths both work without a CDN, new bundler or Node renderer access?
+- Are generated assets recreated on a fresh checkout and included for every runtime consumer, not
+  just the installer? Check the [Desktop Build contract](../backend/desktop-build.md).
 
 ## Read the Owning Spec
 

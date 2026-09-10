@@ -1,0 +1,469 @@
+.button {
+  transition:
+    background 140ms ease,
+    border-color 140ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--control-height);
+  padding: 9px 20px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  font-size: var(--text-label);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.button:hover {
+  text-decoration: none;
+}
+
+.primary {
+  background: var(--accent);
+  color: white;
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--accent-dark);
+}
+
+.secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.secondary:hover:not(:disabled) {
+  background: var(--soft);
+}
+
+.small {
+  min-height: var(--control-compact);
+  font-size: var(--text-help);
+  padding: 6px 13px;
+}
+
+.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: #edc7ca;
+}
+
+.text-button {
+  background: transparent;
+  border: 0;
+  padding: 7px 5px;
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.text-button:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.icon-button {
+  flex: none;
+  min-width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  font-size: var(--text-section);
+  line-height: 1;
+  background: transparent;
+}
+
+.icon-button:hover:not(:disabled) {
+  background: rgba(32, 49, 60, 0.06);
+}
+
+.hint {
+  color: var(--muted);
+  font-size: var(--text-help);
+  line-height: 1.7;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 26px;
+  margin-bottom: 22px;
+}
+
+.field-grid .field-grid {
+  margin-bottom: 0;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 8px;
+}
+
+.field label,
+.field-label,
+legend {
+  font-size: var(--text-label);
+  font-weight: 600;
+}
+
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="time"],
+input[type="datetime-local"],
+input[type="date"],
+select {
+  width: 100%;
+  min-height: var(--control-height);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: white;
+  color: var(--ink);
+  padding: 8px 11px;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+input[type="file"] {
+  max-width: 100%;
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: 6px;
+}
+
+input[type="file"]::file-selector-button {
+  border: 0;
+  border-radius: 3px;
+  padding: 6px 10px;
+  margin-right: 10px;
+  color: var(--ink);
+  background: var(--background);
+  cursor: pointer;
+}
+
+fieldset {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+legend {
+  margin-bottom: 10px;
+  padding: 0;
+}
+
+.scope-field {
+  margin-bottom: 23px;
+}
+
+.radio-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px 25px;
+  margin: 4px 0 12px;
+}
+
+.radio-line label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-label);
+  cursor: pointer;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.segmented button {
+  min-height: var(--control-height);
+  background: white;
+  color: var(--muted);
+  padding: 7px 20px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-weight: 600;
+}
+
+.clock-inputs {
+  margin-top: 12px;
+}
+
+.more-settings {
+  margin-top: 23px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.more-settings > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.more-settings > summary .hint {
+  font-weight: 400;
+  margin-left: 8px;
+}
+
+.more-settings > p {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 14px;
+}
+
+.advanced-content {
+  padding-top: 22px;
+  display: grid;
+  gap: 20px;
+}
+
+.advanced-content .field-grid {
+  margin-bottom: 0;
+}
+
+.choice-picker {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: white;
+  min-width: 0;
+}
+
+.choice-picker > summary {
+  position: relative;
+  cursor: pointer;
+  min-height: var(--control-height);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.choice-picker > summary .hint {
+  float: right;
+  margin-left: 12px;
+}
+
+.choice-body {
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.choice-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.choice-tools input {
+  flex: 1;
+  min-width: 130px;
+  min-height: var(--control-compact);
+  font-size: 13px;
+  padding: 6px 9px;
+}
+
+.choice-tools .text-button {
+  font-size: var(--text-help);
+}
+
+.choice-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+.choice-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  padding: 7px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.choice-row span {
+  overflow-wrap: anywhere;
+}
+
+.choice-row:hover {
+  background: var(--soft);
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 23px;
+}
+
+.form-actions > div {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.sticky-actions {
+  position: static;
+  flex: none;
+  z-index: auto;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  margin-top: 0;
+  padding: 16px 0 0;
+}
+
+.notice-region:empty {
+  display: none;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 12px 15px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: var(--radius-control);
+  font-size: 13px;
+}
+
+.notice > span {
+  flex: 1;
+  overflow-wrap: anywhere;
+  padding-top: 2px;
+}
+
+.notice.error {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: #efc5c7;
+}
+
+.notice.warning {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: #eadbb4;
+}
+
+.notice.success {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+  border-color: #bcd7ca;
+}
+
+.operation-status {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-size: 13px;
+  border-left: 3px solid var(--accent);
+}
+
+.field-error {
+  font-size: 13px;
+  color: var(--danger);
+  line-height: 1.6;
+  margin: 3px 0;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--danger);
+  background: #fffafa;
+}
+
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  margin-top: 20px;
+  font-size: var(--text-help);
+  color: var(--muted);
+}
+
+.pagination > div {
+  display: flex;
+  gap: 10px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--text-label);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Scrollable panels share a quiet, accessible scrollbar rather than OS-specific arrows. */
+.form-content::-webkit-scrollbar,
+.choice-options::-webkit-scrollbar,
+.combo-panel::-webkit-scrollbar,
+.time-options::-webkit-scrollbar,
+.table-scroll::-webkit-scrollbar,
+.ui-popup::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.form-content::-webkit-scrollbar-thumb,
+.choice-options::-webkit-scrollbar-thumb,
+.combo-panel::-webkit-scrollbar-thumb,
+.time-options::-webkit-scrollbar-thumb,
+.table-scroll::-webkit-scrollbar-thumb,
+.ui-popup::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 2px solid var(--surface);
+  border-radius: 8px;
+}

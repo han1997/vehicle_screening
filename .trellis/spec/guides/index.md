@@ -17,7 +17,7 @@ payload rules and implementation examples belong in the backend/frontend specs l
 - Search for a field, value or helper before modifying it. Defaults and mode fields appear in
   several runtimes; finding one occurrence is not proof that the change is complete.
 - Use [Screening Contracts](../backend/screening-contracts.md) for actual mode/snapshot/time/API
-  behavior, not old Flask-only notes or a generic framework assumption.
+  behavior, not archived migration notes or a generic framework assumption.
 - Keep real traffic files and people libraries out of research, fixtures, logs and screenshots.
   Use the existing synthetic test support instead.
 

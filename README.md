@@ -1,175 +1,216 @@
 # 车辆筛查工具（vehicle_screening）
 
-基于 Flask 的本地 Web 工具，用于批量分析车辆通行 Excel 数据，支持卡口配对筛查、频繁车辆筛查、重点人员车辆筛查，并导出预警结果。
+本地车辆通行记录筛查桌面软件（Windows 7 SP1 及以上，32/64 位双版本）。基于 Electron 22 内嵌本地服务与界面，双击即用，无需安装 Python 或浏览器。
+
+仓库只维护桌面版：`static/frontend/` 是 Electron 窗口必需的内置界面，不是独立 Web 产品。旧 Flask/Jinja 实现和 Python 打包链已退役，可从 Git 历史查阅；Python 仅用于开发测试和 Trellis 工具。
 
 ## 1. 主要功能
 
-- 上传 `.xls/.xlsx` 通行数据并自动解析关键字段
-- 卡口配对筛查（两个卡口 + 最大时间间隔）
+- 上传 `.xls/.xlsx` 通行数据并自动解析关键字段（支持多文件、整个文件夹）
+- 卡口配对筛查（两个卡口 + 目标间隔 + 日内时段）
 - 绝对时间卡口筛查（前置时刻前经过 A 卡口 + 后置时刻后离开 B 卡口）
 - 频繁出现车辆筛查（多卡口 + 时间窗 + 最低出现次数）
-- 重点人员车辆筛查（重点车辆库 + 卡口范围 + 时间窗）
-- 结果导出为 Excel（含风险分级和汇总）
-- 本地卡口库与重点人员库维护
+- 重点人员车辆筛查（重点车辆库 + 卡口范围 + 时间窗 + 综合评分）
+- 夜间停留筛查（进口/出口卡口自定义，严格相邻配对，允许时段内任意时刻进入，可选是否要求整段停留在同一夜间窗口内；含「有进入无驶出」「无进入有驶出」两张复核表，疑似漏拍/滞留核查）
+- 结果导出为 Excel（含风险分级底色、合并单元格、冻结表头；夜间停留模式导出 5 个工作表）
+- 本地卡口库与重点人员库维护（长期保存）
 
-## 2. 项目结构
+## 2. 技术架构
 
-- `app.py`：主程序（路由、解析、筛查、导出）
-- `templates/`：页面模板（上传、参数确认、结果展示、卡口库/重点库管理）
-- `static/`：静态资源目录
-- `uploads/`：运行时上传缓存和会话数据（临时目录，不要提交）
-- `checkpoint_library.json`：卡口库
-- `keyperson_library.json`：重点人员库
-- `build_exe.ps1`：Windows 打包脚本
+```
+desktop/
+  main/                   Electron 窗口、下载对话框与本机服务启动
+  server/index.js         应用组装、静态入口和兼容导出
+  server/routes/          HTTP 输入、上传中间件、统一错误边界
+  server/services/        会话/数据、功能调度、结果、资料、导出服务
+  server/services/modes/  五种功能的参数处理与原算法调用
+  server/core/            原有筛选、评分、车辆汇总及持久化逻辑
+  server/excel/           Excel 解析和工作簿生成
+  scripts/                源码图标生成与夜间模式回归脚本
+static/frontend/
+  app.js / app.mjs         轻量启动与依赖组装（原生 ES Modules，无打包步骤）
+  core/                   请求、路由、状态、草稿存储和生命周期
+  domain/                 功能定义、字段、校验、无时区转换的日期工具
+  pages/                  页面组合、纯视图与交互控制器
+  ui/                     公共字段、日期时间、选择器、弹层和文件控件
+  styles/                 设计变量、基础、布局、控件与页面样式
+  workflow.mjs            纯逻辑测试的兼容导出入口
+tests/
+  support/                合成数据、测试服务、浏览器与进程生命周期
+  specs/                  核心、接口和完整页面场景
+  ui/                     仅在测试服务开放的控件展示页
+docs/                     当前模块维护指南
+.trellis/                  项目规范、任务、日志与开发流程工具
+.agents/ / .codex/         当前项目的共享技能与 Codex 接入
 
-## 3. 环境要求
-
-- Python `3.8 - 3.12`
-- Windows PowerShell（用于执行打包脚本）
-
-依赖：
-
-```powershell
-pip install flask pandas xlrd openpyxl
 ```
 
-## 4. 本地运行（源码）
+- 数据存储：`%APPDATA%\VehicleScreening`（会话 2 小时 TTL，卡口库/重点人库长期保存）
+- 端口：从 11000 起自动顺延，仅绑定 127.0.0.1
+- 单实例锁：重复启动自动聚焦已有窗口
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install flask pandas xlrd openpyxl
-python app.py
-```
+## 3. 下载与安装
 
-打开浏览器访问：`http://127.0.0.1:11000`
+`dist_electron_release/<时间戳>/` 目录下有四种交付物：
 
-## 5. 数据格式要求
+| 文件                                       | 说明                         |
+| ------------------------------------------ | ---------------------------- |
+| `vehicle_screening_win7_x64_setup.exe`     | 64 位安装包（推荐）          |
+| `vehicle_screening_win7_ia32_setup.exe`    | 32 位安装包（32 位 Win7 用） |
+| `vehicle_screening_win7_x64_portable.zip`  | 64 位便携版，解压即用        |
+| `vehicle_screening_win7_ia32_portable.zip` | 32 位便携版                  |
+| `SHA256SUMS.txt`                           | 校验和                       |
 
-- 支持文件类型：`.xls`、`.xlsx`
-- 必需字段（可自动匹配常见别名）：`车牌号`、`抓拍时间`、`抓拍地点`
-- 可选字段：`号牌种类/号牌类型`
-- 上传大小限制：`500 MB`（`MAX_CONTENT_LENGTH`）
+安装包为 per-user 模式，**不需要管理员权限**，默认安装到 `%LOCALAPPDATA%\Programs\VehicleScreening`，可选自定义目录，自动创建桌面和开始菜单快捷方式。
 
-## 6. 打包 EXE（Windows）
-
-### 6.1 常规打包
-
-```powershell
-.\build_exe.ps1
-```
-
-已安装 PyInstaller 时可跳过安装步骤：
-
-```powershell
-.\build_exe.ps1 -SkipDepsInstall
-```
-
-输出文件：`dist\vehicle_screening.exe`
-
-### 6.2 Win7 兼容打包（重要）
-
-如果目标机器是 Windows 7，必须使用 Python `3.8.x` 打包：
-
-```powershell
-py -3.8 -m venv .venv38
-.\.venv38\Scripts\python.exe -m pip install -U pip
-.\.venv38\Scripts\python.exe -m pip install flask pandas xlrd openpyxl
-.\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38\Scripts\python.exe
-```
-
-说明：
-
-- `-Win7Compatible` 模式会固定 `pyinstaller==5.13.2`
-- 若不是 Python 3.8，会被脚本直接拦截并提示
-- 不要通过手工下载 DLL 方式修复 `api-ms-win-core-path-l1-1-0.dll`
-
-### 6.3 一键同时生成 Win7 32/64 位安装包
-
-前提：
-
-- 已准备 Python 3.8 x64 与 x86 两套环境（例如 `.venv38` 与 `.venv38_x86`）
-- 已安装 Inno Setup 6（默认 `ISCC.exe` 路径可自动识别）
-
-执行：
-
-```powershell
-.\build_win7_dual_installers.ps1 -SkipDepsInstall
-```
-
-若 Python 环境路径不同，可显式指定：
-
-```powershell
-.\build_win7_dual_installers.ps1 `
-  -Python64Exe .\.venv38\Scripts\python.exe `
-  -Python32Exe .\.venv38_x86\Scripts\python.exe `
-  -SkipDepsInstall
-```
-
-若 Inno Setup 不在默认路径，可指定：
-
-```powershell
-.\build_win7_dual_installers.ps1 `
-  -InnoSetupCompiler "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-```
-
-若只需要生成 32/64 位 Win7 兼容 EXE，不需要安装包，可跳过 Inno Setup：
-
-```powershell
-.\build_win7_dual_installers.ps1 -SkipDepsInstall -SkipInstaller
-```
-
-输出目录：
-
-- `dist\win7_dual\<时间戳>\installer\vehicle_screening_win7_x64_setup.exe`
-- `dist\win7_dual\<时间戳>\installer\vehicle_screening_win7_x86_setup.exe`
-- `dist\win7_dual\<时间戳>\bin\vehicle_screening_win7_x64.exe`
-- `dist\win7_dual\<时间戳>\bin\vehicle_screening_win7_x86.exe`
-- `dist\win7_dual\<时间戳>\SHA256SUMS.txt`
-
-## 7. 使用流程
-
-1. 首页上传 Excel
-2. 在参数页选择筛查模式和条件
-3. 查看结果并下载导出文件
-
-## 8. 常见问题
-
-- 打包后 EXE 无法覆盖：先关闭正在运行的 `vehicle_screening.exe`，再重新打包
-- 浏览器未自动打开：手动访问 `http://127.0.0.1:11000`
-- 解析失败：检查表头是否包含车牌、时间、地点对应列，且时间列可被识别为日期时间
-- 打包报错 `PermissionError: [WinError 5] 拒绝访问 ... dist\vehicle_screening.exe`：
-  这是旧版 EXE 仍在运行导致文件被占用。先执行：
-
-```powershell
-Get-Process vehicle_screening -ErrorAction SilentlyContinue | Stop-Process -Force
-```
-
-  然后重新打包：
-
-```powershell
-.\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38\Scripts\python.exe -SkipDepsInstall
-```
-
-- 运行时报错“此文件的版本与正在运行的 Windows 版本不兼容（x86/x64）”：
-  通常是目标机器系统位数与 EXE 位数不一致（例如 32 位 Win7 运行了 64 位 EXE）。
-  可先在目标机确认系统位数：
+确认系统位数（Win7 上执行）：
 
 ```powershell
 wmic os get osarchitecture
 ```
 
-  如果目标机是 32 位系统，请用 Python 3.8 x86 重新打包：
+## 4. 使用流程
+
+1. 启动后，在“你想查什么车辆？”首页选择需要的功能。
+2. 首次进入功能，选择通行记录 Excel 或整个文件夹，点击“添加并读取数据”。地点（卡口）自动识别，**不需要先维护卡口库**。
+3. 只填写该功能的必要条件，例如先后经过的地点、查询时段或最低次数，再点击“开始查找”。通常无需修改“更多设置”。
+4. 结果先显示车辆清单，点击“查看详情”再看通行记录；“导出全部结果”保存该功能的完整 Excel，不受搜索、分页或夜间分类影响。
+5. 返回功能首页可用同一批数据查询其他功能。每个功能自己的条件和结果都会保留，不会互相覆盖。
+
+| 功能入口             | 主要用途                                                                                                       |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 查两处之间的车辆     | 查找先经过第一处、再经过第二处的车辆；参考通行时间用于匹配排序，不是最长时限                                   |
+| 查经常出现的车辆     | 在指定地点、日内时段内达到最低出现次数的车辆                                                                   |
+| 查指定时间前后的车辆 | 在一个时刻之前经过第一处，另一个时刻之后经过第二处                                                             |
+| 查名单中的车辆       | 在功能页直接导入并保存名单，与通行记录比对；默认查询全部名单车辆                                               |
+| 查夜间停留的车辆     | 设定时段内进入并驶出、停留超过指定时长，可选是否限制同一夜间窗口；另有“只有进入记录”“只有驶出记录”两类复核清单 |
+
+- 每日时段可选择“全天”“夜间”或“自定义”；夜间默认 19:00 至次日 05:00。
+- 频繁出现、名单查询默认使用当前文件的全部地点；需要时再指定部分地点。
+- 号牌排除、导出原始列、名单评分参数和夜间查询日期放在“更多设置”，仅影响当前功能。
+- “更换数据”成功后才切换批次，失败不会清空当前数据；旧批次可从首页“最近使用的数据”恢复。
+- `#/home` 是功能首页，`#/function/pair` 等为专用功能页。支持浏览器前进、后退与直接刷新。
+- 评分只用于原有排序与人工复核，不代表车辆或人员违法。
+
+### 日期、时间与统一控件
+
+- 页面使用统一的中文月历和 24 小时时间选择器，也可以直接键盘填写 `YYYY-MM-DD`、`HH:mm`、`YYYY-MM-DD HH:mm`。
+- 打开弹层、切换月份或点选时分不会立即改写字段；点击“确定”后才应用。“取消”、Esc 或点外部放弃这次弹层修改，原值不变。“清空”也需要确认。
+- 日期网格支持方向键、Home/End、PageUp/PageDown 与 Enter；时间列支持方向键与 Enter；Alt+↓ 打开当前日期时间输入的选择器。
+- 地点单选使用可搜索的统一下拉，多选保留搜索、已选数量和全选搜索结果。名单文件选择区与上传区使用一致的按钮和文件展示。
+- 删除使用页面内确认框，默认聚焦“取消”；系统文件打开、文件夹选择与保存弹窗仍保持原生。
+- 表单内容在独立区域滚动，底部操作栏有自己的布局空间，不覆盖字段和提示。
+
+### 夜间停留的窗口规则
+
+夜间停留允许在设定时段内**任意时刻进入，包括凌晨**，筛选日期范围始终按实际进入日期判断。
+
+- **勾选“进入和驶出必须在同一夜间窗口”（默认）**：整段停留必须在同一个连续窗口内。以 19:00—次日 05:00 为例，凌晨 02:00 进入、04:00 驶出符合窗口条件；20:00 进入、次日 20:00 驶出不符合。
+- **取消勾选**：允许跨白天或多天停留，只要求进入、驶出的时刻分别在设定时段内，并且时长严格超过阈值。
+- 开始和结束时刻均包含边界，结束 05:00 指 05:00:00，不包含 05:00:01。时长按原始时间差判断，显示时的四舍五入不参与比较。
+- 同一窗口选项只影响已配对的停留记录；“只有进入记录”“只有驶出记录”仍按各自日期与时段筛选，包含凌晨记录。
+- 选项按批次和功能保存，并写入已执行条件及 Excel 汇总。更改后需要重新点击“开始查找”，不会自动改写旧结果。缺少该选项的旧版结果会标注“旧版未限制”，编辑旧条件时默认开启新规则。
+
+## 5. 数据格式要求
+
+- 支持文件类型：`.xls`、`.xlsx`
+- 必需字段（自动匹配常见别名）：`车牌号`、`抓拍时间`、`抓拍地点`
+- 可选字段：`号牌种类/号牌类型`
+- 单文件大小限制：500 MB
+
+## 6. 从源码开发
 
 ```powershell
-# 按实际安装路径替换 C:\Python38-32\python.exe
-C:\Python38-32\python.exe -m venv .venv38_x86
-.\.venv38_x86\Scripts\python.exe -m pip install flask pandas xlrd openpyxl pyinstaller==5.13.2
-.\build_exe.ps1 -Win7Compatible -PythonExe .\.venv38_x86\Scripts\python.exe -SkipDepsInstall
+cd desktop
+npm ci               # 按 package-lock.json 安装，使用 .npmrc 中的镜像
+npm start            # 自动生成图标并启动开发版（Electron 窗口）
+npm run server       # 仅调试桌面版内置服务：http://127.0.0.1:11000
 ```
 
-## 9. 安全与数据
+### 测试脚本
 
-- `app.py` 中 `SECRET_KEY` 仅适合本地使用，部署前请修改
-- 不要提交真实业务数据、导出结果和 `uploads/` 目录内容
-- 建议将 EXE 放在有写权限目录运行（避免 `Program Files`）
+```powershell
+npm run test:api                 # 合成数据 API 回归（五模式、持久化、导出）
+node scripts/night-stay-test.js  # 夜间停留模式单元测试（36 项边界断言）
+node scripts/night-stay-e2e.js   # 夜间停留模式端到端测试（含 5 工作表导出验证）
+npm run build:icon              # 单独重新生成应用图标
+```
+
+### 页面流程回归测试
+
+在项目根目录运行（建议开发机使用 Node.js 24、Python 3.12；API 测试最低需要 Node.js 18，Trellis 需要 Python 3.10+。先在 `desktop/` 执行 `npm ci` 安装 Electron；这些工具不会增加成品软件的运行依赖）：
+
+```powershell
+py -3 -m venv .venv  # 首次准备开发测试环境
+./.venv/Scripts/python.exe -m pip install -r tests/requirements.txt
+./.venv/Scripts/python.exe -m pytest tests -q
+```
+
+测试只生成合成 Excel，在系统临时目录中创建隔离会话与 Electron 用户目录；额外检查桌面源码结构、启动/打包图标准备钩子，以及没有预生成资产时的 ICO/PNG 生成。覆盖五个功能的真实页面操作、自动地点识别、分功能条件与结果隔离、旧草稿迁移、车辆汇总及详情、同一夜间窗口开关、跨午夜/多天与精确时长边界、库管理、失败重试、导航竞态、分页及完整下载；Electron 窗口默认隐藏。UI 测试会在 pytest 临时目录保存默认/最小窗口截图，使用 `pytest -s` 可查看位置。原生保存对话框在自动化中由测试接管，发布前仍需手工确认保存、取消和打开文件夹操作。
+
+### 前端代码检查与结构约定
+
+全部运行时资源随应用本地提供，ES Modules 和 CSS 分层无需框架或构建器。开发检查可使用临时下载的工具（不写入项目运行时依赖；ESLint 10 需要 Node.js 20.19+）：
+
+```powershell
+npm exec --yes --package=eslint@10 -- eslint "static/frontend/**/*.mjs" "static/frontend/app.js" "desktop/server/services/**/*.js" "desktop/server/routes/*.js" "desktop/server/http/*.js" "desktop/server/index.js" "tests/**/*.cjs" "tests/ui/*.mjs" --max-warnings=0
+npm exec --yes --package=prettier@3.6.2 -- prettier --check "static/frontend/**/*.{js,mjs,css,html}" "desktop/server/services/**/*.js" "desktop/server/routes/*.js" "desktop/server/http/*.js" "desktop/server/index.js" "tests/**/*.{cjs,mjs,html}"
+```
+
+公共控件用例包括月末/闰年/跨年、无效手输、清空与取消、键盘焦点、禁用状态、下拉搜索和弹层在 125%/150% 缩放下的视口避让。测试驱动用独立日志文件收集输出，主动关闭本次测试的连接和窗口；超时只终止测试自己的进程树，不影响正在使用的软件。
+
+结构与组件扩展约定见 [UI 与模块维护指南](docs/ui-architecture.md)。
+
+### 条件与结果的保留规则
+
+- 同一批次共享原始通行数据，各功能独立保存条件、号牌排除、导出列、搜索页码及最后一次成功查询结果。
+- 返回首页、切换功能、刷新或重开有效会话都不会丢失草稿；打开软件默认回到功能首页。直接刷新功能地址会恢复对应页面。
+- 新数据不沿用旧条件。会话在约 2 小时无访问后过期，届时清理对应草稿；待上传文件只保留在本次打开期间。
+- 常用地点不是查询的前置依赖；从常用库删除地点，不会删除通行文件中已有的地点。
+- 旧会话仅迁移实际已有的查询结果，旧 v1 草稿自动升级为按功能隔离的 v2 格式，不会为未执行的功能生成结果。
+
+### 本地 API 兼容性
+
+- 配置、明细结果及下载接口支持可选 `mode`（`pair` / `frequent` / `timed_cross` / `keyperson` / `night_stay`）；不传时保持旧版“最近执行功能”的行为。
+- `GET /api/review/:dataId?mode=pair` 返回该功能条件、数据摘要及 `result_modes`，`POST /api/filter/:dataId` 继续以 `filter_mode` 指定执行功能。
+- `GET /api/results/:dataId/vehicles?mode=pair&page=1&q=...` 基于全部匹配记录按车牌汇总，每页 20 辆；名单功能也支持姓名搜索。
+- `GET /api/results/:dataId/vehicle?mode=pair&plate=...&page=1` 返回单车明细，每页 50 条。夜间两接口额外支持 `category=matches|entries|exits`。
+- `GET /download/:dataId?mode=pair` 导出指定功能的完整快照；原有 `/api/results/:dataId` 明细分页接口继续可用。
+- 夜间筛选请求可传布尔值 `night_stay_same_window`，新执行请求省略时默认 `true`；必须显式传 `false` 才允许跨窗口停留。已执行配置保留该布尔值，Excel 汇总使用对应的 `same_window` 记录。旧结果缺少此值不代表已按新规则重新计算。
+- 错误码区分 `SESSION_EXPIRED`、`RESULT_NOT_READY`、`VEHICLE_NOT_FOUND`，临时错误或找不到单辆车时不清空活动批次。
+
+## 7. 打包
+
+```powershell
+cd desktop
+npm run dist         # 双架构 NSIS 安装包 + zip 便携版 → dist_electron/
+npm run dist:x64     # 仅 64 位
+npm run dist:ia32    # 仅 32 位
+```
+
+上述打包命令会先运行 `build:icon`，无需提交或手工准备 `desktop/build/` 中的图标；窗口所需的 `build/icon.ico` 会随应用一起打包。安装包仅包含桌面主进程、内置服务、运行依赖和内置界面，不包含开发测试或旧 Python 程序。
+
+输出后按 README 第 3 节整理发布目录并生成 SHA256SUMS。安装包、依赖目录和生成资产留在本地，不提交到 Git。
+
+## 8. 常见问题
+
+- **32 位版处理大数据慢/内存不足**：32 位进程约 2GB 内存上限，建议单文件 10 万行以内用 32 位版；更大数据用 64 位版
+- **启动后无窗口**：程序已内置禁用 GPU 加速兜底；先关闭残留进程后重试。如需重置 `%APPDATA%\VehicleScreening`，务必先完整备份，其中包含卡口库、名单库和会话数据
+- **端口被占用**：自动从 11000 顺延尝试 20 个端口，无需手动处理
+- **重复启动**：单实例锁生效，自动聚焦已打开的窗口
+- **杀软误报**：Electron 应用偶有误报，可将安装目录加入白名单；SHA256SUMS.txt 可用于校验文件完整性
+- **导出的 Excel 打不开**：确认使用 Excel 2007 及以上版本（.xlsx 格式）
+
+## 9. Win7 兼容性说明
+
+- Electron 22.3.27（Chromium 108）是官方支持 Windows 7 的最后版本线
+- 界面 CSS/JS 全部兼容 Chromium 108（无 oklch 等新语法）
+- 已禁用 GPU 硬件加速（软件渲染，规避老显卡白屏）与沙箱（规避 Win7 缺失的 Win10 API）
+- 安装包最低系统要求 Windows 7 SP1
+
+## 10. 安全与数据
+
+- 本地服务仅绑定 127.0.0.1，不对外网开放
+- 上传的 Excel 仅保存在本机会话目录，会话过期自动清理
+- 不要提交真实业务数据、导出结果到仓库；`.gitignore` 已排除 Excel/CSV/数据库、资料库、上传目录及本地调试文件。
+- Trellis 开发配置保留；个人编辑器配置、密钥、虚拟环境、缓存和历史发布包只在本地使用。

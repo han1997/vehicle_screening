@@ -54,11 +54,12 @@ ad hoc in each page.
 For a new visual element, search `ui/` and the shared CSS first. For a new mode field, inspect
 `domain/fields.mjs`, `domain/forms.mjs`, its conditions view and the backend mode adapter together.
 
-## Styles and Legacy UI
+## Styles and Desktop Resources
 
 [styles.css](../../../static/frontend/styles.css) loads exactly this order:
 `tokens -> base -> layout -> components -> pages -> pickers`. Put a shared style in its shared
 layer, not in a later page override that masks conflicting definitions.
 
-`templates/*.html` are legacy Flask/Jinja pages with their own conventions. They are not the source
-of the native desktop modules. Keep any requested legacy changes explicit and verify them separately.
+These native modules are the desktop renderer, not a separate Web product. They remain packaged
+through `extraResources` after retiring the standalone Flask/Jinja source. Keep the dev and packaged
+resource paths aligned; see [Desktop Build](../backend/desktop-build.md).

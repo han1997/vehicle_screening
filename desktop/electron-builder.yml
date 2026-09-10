@@ -1,0 +1,59 @@
+appId: com.vehicle.screening
+productName: VehicleScreening
+copyright: Vehicle Screening
+
+directories:
+  output: dist_electron
+  buildResources: build
+
+electronVersion: 22.3.27
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+
+files:
+  - main/**/*
+  - server/**/*
+  - build/icon.ico
+  - package.json
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!**/node_modules/*.d.ts"
+  - "!**/node_modules/.bin"
+  - "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}"
+  - "!**/._*"
+  - "!**/{.git,.hg,.svn,CVS,RCS,SCCS,__pycache__,.DS_Store,Thumbs.db,.gitignore,.gitkeep,.gitattributes,.editorconfig,.flowconfig,.jshintrc,.eslintrc}"
+  - "!**/{appveyor.yml,.travis.yml,circle.yml,.nyc_output}"
+  - "!**/node_modules/electron/**"
+
+extraResources:
+  - from: ../static/frontend
+    to: frontend
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - ia32
+    - target: zip
+      arch:
+        - x64
+        - ia32
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 车辆进出筛选工具
+  artifactName: vehicle_screening_win7_${arch}_setup.${ext}
+  deleteAppDataOnUninstall: false
+
+artifactName: ${productName}-${version}-${arch}.${ext}
+
+compression: normal

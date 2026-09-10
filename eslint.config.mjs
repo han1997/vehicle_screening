@@ -1,0 +1,78 @@
+const browserGlobals = [
+  "window",
+  "document",
+  "location",
+  "history",
+  "navigator",
+  "localStorage",
+  "fetch",
+  "FormData",
+  "Event",
+  "PointerEvent",
+  "KeyboardEvent",
+  "XMLHttpRequest",
+  "URL",
+  "URLSearchParams",
+  "AbortController",
+  "ResizeObserver",
+  "MutationObserver",
+  "HTMLElement",
+  "Node",
+  "getComputedStyle",
+  "innerWidth",
+  "innerHeight",
+  "requestAnimationFrame",
+  "cancelAnimationFrame",
+  "setTimeout",
+  "clearTimeout",
+  "console",
+  "globalThis",
+];
+export default [
+  { ignores: ["**/node_modules/**", "**/dist*/**", ".venv*/**"] },
+  {
+    files: ["static/frontend/**/*.mjs", "static/frontend/app.js", "tests/ui/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: Object.fromEntries(browserGlobals.map((name) => [name, "readonly"])),
+    },
+    rules: {
+      "no-undef": "error",
+      "no-unused-vars": ["warn", { args: "none", caughtErrors: "none", varsIgnorePattern: "^_" }],
+    },
+  },
+  {
+    files: [
+      "desktop/server/services/**/*.js",
+      "desktop/server/routes/*.js",
+      "desktop/server/http/*.js",
+      "desktop/server/index.js",
+      "tests/**/*.cjs",
+    ],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "commonjs",
+      globals: Object.fromEntries(
+        [
+          "process",
+          "__dirname",
+          "__filename",
+          "Buffer",
+          "console",
+          "setTimeout",
+          "clearTimeout",
+          "fetch",
+          "FormData",
+          "Blob",
+          "URLSearchParams",
+          "URL",
+        ].map((name) => [name, "readonly"])
+      ),
+    },
+    rules: {
+      "no-undef": "error",
+      "no-unused-vars": ["warn", { args: "none", caughtErrors: "none", varsIgnorePattern: "^_" }],
+    },
+  },
+];

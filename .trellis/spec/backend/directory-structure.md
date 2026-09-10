@@ -14,7 +14,7 @@
 | `desktop/server/core/`            | Filtering, scoring, result aggregation, pagination, session and library stores  |
 | `desktop/server/excel/`           | SheetJS input normalization and ExcelJS workbook generation                     |
 | `tests/`                          | Python entrypoints, Node/Electron drivers, shared fixtures and assertions       |
-| `desktop/scripts/`                | Existing smoke, parity and night-stay regression utilities                      |
+| `desktop/scripts/`                | Source icon generator and retained night-stay regression utilities              |
 
 This is a single repository, not a configured Trellis monorepo. Frontend source lives outside the
 npm package at `static/frontend/`. Dependencies and npm scripts live in `desktop/package.json`.
@@ -61,9 +61,10 @@ retries occupied ports. It uses Electron 22.3.27 for Windows 7 compatibility. Re
 [Packaging](../../../desktop/electron-builder.yml) copies the frontend through `extraResources`;
 assets must work in both the development directory and `process.resourcesPath/frontend`.
 
-The legacy [app.py](../../../app.py) owns Flask/Jinja and Python processing. Do not modify it as a
-side effect of a desktop refactor, and do not import Python storage assumptions into the Node store.
-Algorithm parity work must explicitly inspect and test both implementations.
+This is a desktop-only source tree. Do not reintroduce the retired Flask/Jinja application or
+Python packaging/parity scripts. Existing desktop snapshot/API compatibility still matters and is
+covered by the synthetic regression suites; it is not a dependency on a second product runtime.
+For generated icons and source-only builds, follow [Desktop Build](./desktop-build.md).
 
 ## Avoid
 

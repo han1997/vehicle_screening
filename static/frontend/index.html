@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="在本机查询 Excel 通行记录，按功能快速查找车辆。" />
+    <title>车辆查询工具</title>
+    <link rel="stylesheet" href="/app/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <header class="app-header">
+      <a class="brand" data-route href="#/home"
+        ><span class="brand-mark" aria-hidden="true">行</span
+        ><span>车辆查询工具<small>本机处理 · 数据不联网</small></span></a
+      >
+      <nav class="header-actions" aria-label="软件导航">
+        <a data-route href="#/home">功能首页</a
+        ><a data-route href="#/library/keypersons">资料管理</a
+        ><button type="button" data-refresh>刷新</button>
+      </nav>
+    </header>
+    <main class="app-main" id="main-content" tabindex="-1">
+      <div class="notice-region" data-notices></div>
+      <div class="operation-status" data-operation role="status" hidden></div>
+      <div data-view aria-busy="true"></div>
+    </main>
+    <iframe name="vehicle-download" title="导出结果" data-download-target hidden></iframe>
+    <script type="module" src="/app/app.js"></script>
+  </body>
+</html>

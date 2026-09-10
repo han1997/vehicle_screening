@@ -10,7 +10,7 @@ compatible newer development Node (see its package engine requirement); this is 
 Electron 22 runtime embedded in the shipped application.
 
 [ESLint configuration](../../../eslint.config.mjs) enables `no-undef` and `no-unused-vars` in the
-listed module globs. Warnings fail the command below. Main/core/excel legacy JavaScript is not
+listed module globs. Warnings fail the command below. Main/core/excel JavaScript is not
 included in that lint selection: do not present it as full-repository lint coverage.
 [Prettier configuration](../../../.prettierrc.json) specifies two spaces, width 100 and ES5 trailing
 commas. Format only the task's changed files, not unrelated pre-existing work.
@@ -49,6 +49,10 @@ equal(vehicles.items.length, 20, "vehicle list pages by 20");
 check(!("rows" in vehicles.items[0]), "list does not ship all detail rows");
 ```
 
+The [desktop build regressions](../../../tests/test_desktop_build.py) also guard the desktop-only
+checkout, all icon preparation hooks, packaged icon declaration and source-only ICO/PNG generation.
+See [Desktop Build](./desktop-build.md) before changing packaging.
+
 ## Required Regression Dimensions
 
 - New parser/parameter: empty, malformed, boundary and valid values; preserve explicit `[]`/`false`.
@@ -68,7 +72,6 @@ frontendDir })` injectable, bind tests to loopback on an ephemeral port, and clo
 and BrowserWindows. The Python runner hides child windows and removes `ELECTRON_RUN_AS_NODE`.
 Use pytest's runner rather than starting the interactive application for automation.
 
-Passing these tests does not validate the legacy Flask runtime, actual Windows 7 hardware, a new
-installer, or native save/cancel/open-folder dialogs. For affected releases, run the appropriate
-parity/build/manual checks and report untested areas explicitly. Do not run root scratch scripts or
+Passing these tests does not validate actual Windows 7 hardware, a new installer, or native
+save/cancel/open-folder dialogs. For affected releases, run the appropriate build/manual checks and report untested areas explicitly. Do not run root scratch scripts or
 open real `.xls`/`.xlsx` files as a shortcut for fixtures.

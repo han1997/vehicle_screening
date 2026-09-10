@@ -7,8 +7,8 @@ Express server. It uses browser ES modules, not React/Vue, TypeScript, a bundler
 framework. The compatibility baseline is Electron 22.3.27 / Chromium 108 (Windows 7 support).
 
 [UI architecture notes](../../../docs/ui-architecture.md) and the current sources are authoritative.
-Legacy `templates/` and the Flask-only description in `CLAUDE.md` are not the architecture for new
-desktop UI work. Keep Chinese UI copy and existing design tokens; write these specs in English.
+The retired standalone Web implementation is no longer present; keep the embedded renderer and
+local Express resources together when restructuring desktop source. Keep Chinese UI copy and existing design tokens; write these specs in English.
 
 ## Pre-Development Checklist
 

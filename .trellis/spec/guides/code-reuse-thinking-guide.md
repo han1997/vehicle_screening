@@ -34,7 +34,7 @@ Consult [backend placement](../backend/directory-structure.md) and
 - Is this the same behavior with different options, or are similar names hiding different contracts?
 - Can the existing pure helper or mounted control be extended without bringing business state into it?
 - Can Node tests import the existing `workflow.mjs` facade instead of copying browser logic?
-- Does a default also appear in backend config, browser forms, legacy Python or migration paths?
+- Does a default also appear in backend config, browser forms or old desktop draft/snapshot migration paths?
   Which runtimes must change for this task, and which are intentionally out of scope?
 - Will extracting a shared constant force CommonJS/Node dependencies into the browser? Preserve
   runtime boundaries; synchronize cross-runtime defaults through contracts and tests instead.

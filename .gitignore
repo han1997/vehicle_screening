@@ -1,44 +1,53 @@
-# Python
+# Python development tools (pytest / Trellis only)
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-
-# Virtual environment
-.venv/
-.venv38/
-.venv38_x86/
+.venv*/
 venv/
 env/
+.pytest_cache/
 
-# IDE
-.idea/
-
-# Uploads (user data)
-uploads/
-
-# Runtime data
-checkpoint_library.json
-keyperson_library.json
-
-# OS files
-Thumbs.db
-Desktop.ini
-.DS_Store
-
-# Claude Code
-.claude/
-
-# PyInstaller artifacts
+# Dependencies and generated desktop build/release artifacts
+node_modules/
+*.log
 build/
 dist/
+desktop/dist_electron/
+dist_electron_release/
 *.spec
 _pyi_runtime/
 
-# Local test/debug artifacts
-review_debug.html
-review_rendered.html
-test_upload.xls
-测试.xls
-test.py
-汇总结果.csv
+# Private traffic data, exports and runtime stores -- never publish
+uploads/
+checkpoint_library.json
+keyperson_library.json
+session_history.json
+*.xls
+*.xlsx
+*.csv
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Personal notes/debug files and local editor integrations
+/test.md
+/test.py
+/review_debug.html
+/review_rendered.html
+/_parity_*
+/_tmp_*
+.idea/
+.vscode/
+.claude/
+.cursor/
+.opencode/
+
+# Local secrets and OS metadata
+.env
+.env.*
+!.env.example
+Thumbs.db
+Desktop.ini
+.DS_Store

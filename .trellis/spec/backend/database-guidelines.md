@@ -1,11 +1,12 @@
 # Database and Persistence Guidelines
 
-## Two Different Storage Models
+## Desktop Storage Model
 
 The current desktop application has **no ORM, database server or migration framework**. It uses
 [SessionStore](../../../desktop/server/core/session.js) and
 [LibraryStore](../../../desktop/server/core/libraries.js), injected into services by `createApp`.
-The retained Python application separately stores DataFrames in SQLite; see the final section.
+The retired Flask/SQLite implementation is no longer in this repository. Do not add Python, pandas
+or a database server as a dependency of desktop persistence.
 
 ## Desktop Layout and Ownership
 
@@ -66,15 +67,6 @@ session store's temp-file protocol. Do not claim all application writes are atom
   normalized/deduplicated; people are keyed by plate. Use the store APIs rather than direct writes.
 - Library maintenance may prune editable configuration, but must not mutate historical
   `applied_config` or saved result contents; see [library service](../../../desktop/server/services/library.js).
-
-## Legacy Flask SQLite
-
-[app.py](../../../app.py) uses `uploads/<data_id>.db`, pandas and standard-library `sqlite3`.
-`_save_df` enables WAL and `synchronous=NORMAL`, uses `to_sql(..., method="multi")`, and sizes batches
-with `_sqlite_insert_chunksize(conn, len(df.columns))` to respect SQLite's parameter limit.
-`_load_df` and type-restoration helpers recover datetime columns. Connections close in `finally`.
-Table names are internal identifiers; never substitute untrusted request values into SQL names.
-Do not apply this DataFrame model to the desktop JSON store.
 
 ## Verification / Common Mistakes
 

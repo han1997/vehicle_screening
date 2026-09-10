@@ -1,0 +1,16 @@
+ M .gitignore
+ M AGENTS.md
+ M CHANGELOG.md
+ M README.md
+?? .agents/
+?? .codex/
+?? .cursor/
+?? .opencode/
+?? .prettierrc.json
+?? .trellis/
+?? desktop/
+?? docs/
+?? eslint.config.mjs
+?? static/
+?? test.md
+?? tests/

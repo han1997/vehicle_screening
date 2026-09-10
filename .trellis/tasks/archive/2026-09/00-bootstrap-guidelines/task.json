@@ -1,0 +1,30 @@
+{
+  "id": "00-bootstrap-guidelines",
+  "name": "00-bootstrap-guidelines",
+  "title": "Bootstrap Guidelines",
+  "description": "Fill in project development guidelines for AI agents",
+  "status": "completed",
+  "dev_type": "docs",
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "han1997",
+  "assignee": "han1997",
+  "createdAt": "2026-09-09",
+  "completedAt": "2026-09-10",
+  "branch": null,
+  "base_branch": null,
+  "worktree_path": null,
+  "commit": "b48d67c5be51f5e4c61503e10a26d70605450bca",
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    ".trellis/spec/backend/",
+    ".trellis/spec/frontend/",
+    ".trellis/spec/guides/"
+  ],
+  "notes": "Completed bootstrap specs and all quality checks on 2026-09-10. Work committed as b48d67c5be51f5e4c61503e10a26d70605450bca. User approved the scoped commit and remote push. Other pre-existing product/tooling changes are excluded and preserved; archive and journal are separate bookkeeping commits.",
+  "meta": {}
+}
